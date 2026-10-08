@@ -10,6 +10,7 @@
 #include "esp_bt_defs.h"
 #include "esp_gap_ble_api.h"
 #include "svc_resume.h"
+#include "svc_target.h"
 #include "ui_wifiscan.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -170,6 +171,17 @@ static void draw_detail(void) {
     det_field(fb, &y, "FLAGS", fl);
     det_field(fb, &y, "SVC", svc);
     det_field(fb, &y, "MFR", mfr);
+    gfx_text(fb, &hacku_font, 6, HACKU_DISP_H - 24,
+             "BACK", CALC_DIM, -1, 1);
+    {
+        int is_sel = tgt_ble_has() &&
+            !strcmp(s_devs[s_sel].mac, tgt_ble_mac());
+        const char *rs = is_sel ? "selected" : "RIGHT=select";
+        gfx_text(fb, &hacku_font,
+                 HACKU_DISP_W - 6 - gfx_text_w(&hacku_font, rs, 1),
+                 HACKU_DISP_H - 24, rs,
+                 is_sel ? C_GREEN : CALC_DIM, -1, 1);
+    }
     hacku_display_flush_all();
 }
 
@@ -270,6 +282,11 @@ int ui_blescan_key(hacku_key_t k) {
             case KEY_BACK:
                 s_detail = 0;
                 draw_list();
+                return 0;
+            case KEY_RIGHT:
+                tgt_ble_set(s_devs[s_sel].mac, s_devs[s_sel].name,
+                            s_devs[s_sel].addr_type);
+                draw_detail();
                 return 0;
             default:
                 return 0;

@@ -8,6 +8,7 @@
 #include "esp_wifi_types.h"
 #include "esp_heap_caps.h"
 #include "svc_resume.h"
+#include "svc_target.h"
 #include "ui_blescan.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -198,6 +199,17 @@ static void draw_detail(void) {
     det_field(fb, &y, "WPS", ap->wps ? "yes" : "no");
     det_field(fb, &y, "FTM", ftm);
     det_field(fb, &y, "CC", cc);
+    gfx_text(fb, &hacku_font, 6, HACKU_DISP_H - 24,
+             "BACK", CALC_DIM, -1, 1);
+    {
+        int is_sel = tgt_wifi_has() &&
+            !memcmp(ap->bssid, tgt_wifi_bssid(), 6);
+        const char *rs = is_sel ? "selected" : "RIGHT=select";
+        gfx_text(fb, &hacku_font,
+                 HACKU_DISP_W - 6 - gfx_text_w(&hacku_font, rs, 1),
+                 HACKU_DISP_H - 24, rs,
+                 is_sel ? C_GREEN : CALC_DIM, -1, 1);
+    }
     hacku_display_flush_all();
 }
 
@@ -300,6 +312,11 @@ int ui_wifiscan_key(hacku_key_t k) {
             case KEY_BACK:
                 s_detail = 0;
                 draw_list();
+                return 0;
+            case KEY_RIGHT:
+                tgt_wifi_set(s_aps[s_sel].ssid, s_aps[s_sel].bssid,
+                             s_aps[s_sel].channel);
+                draw_detail();
                 return 0;
             default:
                 return 0;

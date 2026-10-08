@@ -6,6 +6,8 @@
 #include "ui_menu.h"
 #include "ui_wifiscan.h"
 #include "ui_blescan.h"
+#include "ui_wifiatk.h"
+#include "ui_bleatk.h"
 #include "svc_wifi.h"
 #include "svc_ble.h"
 #include "svc_resume.h"
@@ -19,10 +21,19 @@
 
 static const char *TAG = "hackulator";
 
-typedef enum { SCR_CALC, SCR_MENU, SCR_WIFISCAN, SCR_BLESCAN } screen_t;
+typedef enum {
+    SCR_CALC,
+    SCR_MENU,
+    SCR_WIFISCAN,
+    SCR_BLESCAN,
+    SCR_WIFIATK,
+    SCR_BLEATK,
+} screen_t;
 
-static const char *MENU_ITEMS[] = { "WiFi scan", "BLE scan" };
-#define MENU_N 2
+static const char *MENU_ITEMS[] = {
+    "WiFi scan", "BLE scan", "WiFi attacks", "BLE attacks",
+};
+#define MENU_N 4
 
 static void show_menu(void) {
     ui_menu_enter("HACKULATOR", MENU_ITEMS, MENU_N);
@@ -112,6 +123,27 @@ void app_main(void) {
                 } else if (sel == 1) {
                     screen = SCR_BLESCAN;
                     ui_blescan_run(); /* stops WiFi internally */
+                } else if (sel == 2) {
+                    svc_ble_stop();
+                    svc_wifi_teardown(); /* attacks start radio-cold */
+                    if (!ui_wifiatk_require()) {
+                        /* nothing selected / target gone: scan page */
+                        screen = SCR_WIFISCAN;
+                        ui_wifiscan_run();
+                    } else {
+                        screen = SCR_WIFIATK;
+                        ui_wifiatk_run();
+                    }
+                } else if (sel == 3) {
+                    svc_ble_stop();
+                    svc_wifi_teardown();
+                    if (!ui_bleatk_require()) {
+                        screen = SCR_BLESCAN;
+                        ui_blescan_run();
+                    } else {
+                        screen = SCR_BLEATK;
+                        ui_bleatk_run();
+                    }
                 }
                 /* BACK on the top menu does nothing (relock via gesture) */
             } else if (screen == SCR_WIFISCAN) {
@@ -121,6 +153,16 @@ void app_main(void) {
                 }
             } else if (screen == SCR_BLESCAN) {
                 if (ui_blescan_key(k)) {
+                    screen = SCR_MENU;
+                    show_menu();
+                }
+            } else if (screen == SCR_WIFIATK) {
+                if (ui_wifiatk_key(k)) {
+                    screen = SCR_MENU;
+                    show_menu();
+                }
+            } else if (screen == SCR_BLEATK) {
+                if (ui_bleatk_key(k)) {
                     screen = SCR_MENU;
                     show_menu();
                 }
