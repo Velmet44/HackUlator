@@ -4,6 +4,7 @@
 #include "gfx.h"
 #include "font.h"
 #include "svc_resume.h"
+#include "ui_status.h"
 #include <stdio.h>
 
 static const char *s_title;
@@ -31,6 +32,12 @@ static void draw(void) {
                  i == s_sel ? C_WHITE : CALC_DIM, -1, 1);
     }
     {
+        /* Status bar above the boot-cause footer: mem + targets. */
+        char st[24];
+        ui_status_line(st, sizeof(st));
+        int sw = gfx_text_w(&hacku_font, st, 1);
+        gfx_text(fb, &hacku_font, (HACKU_DISP_W - sw) / 2, HACKU_DISP_H - 52,
+                 st, CALC_DIM, -1, 1);
         /* Boot-cause tag: tells brownouts / EN glitches / panics apart. */
         char f[16];
         snprintf(f, sizeof(f), "boot %s", resume_boot_cause());

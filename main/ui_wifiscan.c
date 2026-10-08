@@ -9,6 +9,7 @@
 #include "esp_heap_caps.h"
 #include "svc_resume.h"
 #include "svc_target.h"
+#include "ui_status.h"
 #include "ui_blescan.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -114,15 +115,34 @@ static void draw_list(void) {
             gfx_text(fb, &hacku_font, 6, LIST_Y0 + i * ROW_PX + 22,
                      det, CALC_DIM, -1, 1);
         }
-        if (s_count > ROWS) {
-            char more[24]; /* 2x worst-case int + '/' + NUL */
-            snprintf(more, sizeof(more), "%d/%d", s_top + 1, s_count);
+        /* Footer: position + free heap left, targets (or OK hint when
+         * none set yet) right. */
+        {
+            char left[16], right[16];
+            int a = s_top + 1, b = s_count; /* clamp: int-proof buffer */
+            if (a < 0)
+                a = 0;
+            if (a > 99)
+                a = 99;
+            if (b < 0)
+                b = 0;
+            if (b > 99)
+                b = 99;
+            if (s_count > ROWS)
+                snprintf(left, sizeof(left), "%d/%d %uK", a, b,
+                         ui_status_memk());
+            else
+                snprintf(left, sizeof(left), "%uK", ui_status_memk());
             gfx_text(fb, &hacku_font, 6, HACKU_DISP_H - 24,
-                     more, CALC_DIM, -1, 1);
+                     left, CALC_DIM, -1, 1);
+            if (tgt_wifi_has() || tgt_ble_has())
+                ui_status_targets(right, sizeof(right));
+            else
+                snprintf(right, sizeof(right), "OK");
+            gfx_text(fb, &hacku_font,
+                     HACKU_DISP_W - 6 - gfx_text_w(&hacku_font, right, 1),
+                     HACKU_DISP_H - 24, right, CALC_DIM, -1, 1);
         }
-        gfx_text(fb, &hacku_font,
-                 HACKU_DISP_W - 6 - gfx_text_w(&hacku_font, "OK", 1),
-                 HACKU_DISP_H - 24, "OK", CALC_DIM, -1, 1);
     }
     hacku_display_flush_all();
 }

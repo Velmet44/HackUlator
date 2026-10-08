@@ -7,6 +7,7 @@
 #include "svc_wifi.h"
 #include "svc_ble.h"
 #include "svc_target.h"
+#include "ui_status.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdio.h>
@@ -43,6 +44,13 @@ static void draw(void) {
     gfx_text(fb, &hacku_font,
              (HACKU_DISP_W - gfx_text_w(&hacku_font, l1, 1)) / 2, 140,
              l1, CALC_DIM, -1, 1);
+    {
+        char st[24];
+        ui_status_line(st, sizeof(st));
+        gfx_text(fb, &hacku_font,
+                 (HACKU_DISP_W - gfx_text_w(&hacku_font, st, 1)) / 2,
+                 HACKU_DISP_H - 52, st, CALC_DIM, -1, 1);
+    }
     const char *l2 = "BACK to return";
     gfx_text(fb, &hacku_font,
              (HACKU_DISP_W - gfx_text_w(&hacku_font, l2, 1)) / 2,
