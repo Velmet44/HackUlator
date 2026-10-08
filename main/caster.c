@@ -110,8 +110,9 @@ static void caster_task(void *arg) {
     };
     /* RX ring for remote key bytes, TX ring for the rect stream. Small
      * rings: uart_write_bytes blocks, so a busy UI throttles to the wire.
-     * (Big rings would steal the contiguous heap WiFi/BT need.) */
-    uart_driver_install(UART_NUM_0, 1024, 4096, 0, NULL, 0);
+     * (Big rings would steal the contiguous heap WiFi/BT need: RX holds a
+     * few key bytes, TX just smooths bursts — 2.5 KB saved vs stock.) */
+    uart_driver_install(UART_NUM_0, 512, 2048, 0, NULL, 0);
     uart_param_config(UART_NUM_0, &cfg);
     uart_set_pin(UART_NUM_0, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE,
                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);

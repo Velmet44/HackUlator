@@ -15,6 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
+#include "esp_bt.h"
 
 static const char *TAG = "hackulator";
 
@@ -28,6 +29,10 @@ static void show_menu(void) {
 }
 
 void app_main(void) {
+    /* BLE-only device: release Classic-BT controller RAM to the heap FIRST,
+     * before the framebuffer carves DRAM into immovable blocks. One-shot
+     * and irreversible; BLE bring-up later is unaffected. */
+    esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
     ESP_LOGI(TAG, "largest free block: %u",
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     /* Framebuffer FIRST: it needs the largest contiguous DRAM block, before
@@ -83,6 +88,9 @@ void app_main(void) {
                     screen = SCR_CALC;
                     svc_wifi_teardown(); /* radios off + heap freed */
                     svc_ble_stop();
+                    ui_wifiscan_drop(); /* free scan lists so the next
+                                         * bring-up gets the block back */
+                    ui_blescan_drop();
                     ui_calc_enter();
                 }
                 continue;
@@ -125,6 +133,8 @@ void app_main(void) {
             screen = SCR_CALC;
             svc_wifi_teardown();
             svc_ble_stop();
+            ui_wifiscan_drop();
+            ui_blescan_drop();
             ui_calc_enter();
         }
         vTaskDelay(pdMS_TO_TICKS(20));

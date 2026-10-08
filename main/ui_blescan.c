@@ -10,6 +10,7 @@
 #include "esp_bt_defs.h"
 #include "esp_gap_ble_api.h"
 #include "svc_resume.h"
+#include "ui_wifiscan.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdio.h>
@@ -198,6 +199,7 @@ static int heap_ok_or_reboot(void) {
 
 int ui_blescan_run(void) {
     svc_wifi_teardown(); /* one radio at a time: free WiFi heap for BT */
+    ui_wifiscan_drop(); /* the other radio's list is dead weight now */
     if (!heap_ok_or_reboot())
         return -1;
     char sl2[24];
@@ -231,6 +233,17 @@ int ui_blescan_run(void) {
     resume_mark_ok();
     draw_list();
     return s_count;
+}
+
+void ui_blescan_drop(void) {
+    if (s_devs) {
+        free(s_devs);
+        s_devs = NULL;
+    }
+    s_count = -2;
+    s_top = 0;
+    s_sel = 0;
+    s_detail = 0;
 }
 
 int ui_blescan_key(hacku_key_t k) {

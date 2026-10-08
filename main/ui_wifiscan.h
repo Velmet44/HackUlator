@@ -10,3 +10,6 @@ int ui_wifiscan_run(void);
 
 /* Returns 1 when the user asks to leave (BACK), 0 otherwise. */
 int ui_wifiscan_key(hacku_key_t k);
+
+/* Free the AP list (lets the other radio's bring-up reuse the block). */
+void ui_wifiscan_drop(void);

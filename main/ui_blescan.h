@@ -10,3 +10,6 @@ int ui_blescan_run(void);
 
 /* Returns 1 when the user asks to leave (BACK), 0 otherwise. */
 int ui_blescan_key(hacku_key_t k);
+
+/* Free the device list (lets the other radio's bring-up reuse the block). */
+void ui_blescan_drop(void);

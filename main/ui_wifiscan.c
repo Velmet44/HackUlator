@@ -8,6 +8,7 @@
 #include "esp_wifi_types.h"
 #include "esp_heap_caps.h"
 #include "svc_resume.h"
+#include "ui_blescan.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdio.h>
@@ -228,6 +229,7 @@ static int heap_ok_or_reboot(void) {
 }
 
 int ui_wifiscan_run(void) {
+    ui_blescan_drop(); /* the other radio's list is dead weight now */
     if (!heap_ok_or_reboot())
         return -1;
     char sl2[24];
@@ -261,6 +263,17 @@ int ui_wifiscan_run(void) {
     resume_mark_ok();
     draw_list();
     return s_count;
+}
+
+void ui_wifiscan_drop(void) {
+    if (s_aps) {
+        free(s_aps);
+        s_aps = NULL;
+    }
+    s_count = -2;
+    s_top = 0;
+    s_sel = 0;
+    s_detail = 0;
 }
 
 int ui_wifiscan_key(hacku_key_t k) {
