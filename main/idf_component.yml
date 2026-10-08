@@ -1,0 +1,3 @@
+## IDF Component Manager manifest
+dependencies:
+  espressif/esp_lcd_ili9341: "*"

@@ -1,0 +1,52 @@
+# Hackulator build defaults — Phase 0
+CONFIG_IDF_TARGET="esp32"
+
+# RAM is tight (150 KB framebuffer + WiFi): trim task stacks.
+CONFIG_ESP_TIMER_TASK_STACK_SIZE=2048
+CONFIG_MAIN_TASK_STACK_SIZE=3072
+
+# Bluetooth (Bluedroid, BLE-only mode at runtime).
+CONFIG_BT_ENABLED=y
+
+# Size-optimize: 2 MB flash, tight IRAM with WiFi+BT.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# 2 MB flash needs a custom table (default factory is 1 MB).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Scan-only WiFi: minimal buffers (throughput irrelevant, RAM is not).
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_TX_BUFFER_TYPE=1
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+
+# IDF 5.4+ split BLE 4.2 ADV/SCAN into sub-options (default ON for ESP32).
+# This sdkconfig migrated from 5.3 with them OFF, which compiles out the
+# legacy GAP scan API (undefined refs to esp_ble_gap_*). Force ON.
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+CONFIG_BT_BLE_42_SCAN_EN=y
+CONFIG_BT_BLE_42_ADV_EN=y
+
+# Scan-only WiFi: keep WiFi code out of IRAM. IDF 5.5 overflows IRAM0 by
+# ~1 KB with the 5.3-era IRAM opts; AP scans don't need the performance.
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+
+# RAM diet for the WiFi<->BT handover: re-init OOMs inside BTU_StartUp on
+# IDF 5.5 (150 KB FB + controller/host + resident lwIP). The scanner is
+# GAP-only: no GATT server/client roles, single connection max, and no IP
+# traffic ever flows, so trim all three pools.
+CONFIG_BT_GATTS_ENABLE=n
+CONFIG_BT_GATTC_ENABLE=n
+# Scanner never pairs/bonds/connects: SMP off removes the btc_config/NVS
+# key path (whose re-init malloc fails after a WiFi cycle) plus pairing RAM.
+# GAP scan + PUBLIC addr need none of it. NOTE: BT_SMP_ENABLE is an
+# invisible symbol defaulting to BT_BLE_SMP_ENABLE: both must go.
+CONFIG_BT_SMP_ENABLE=n
+CONFIG_BT_BLE_SMP_ENABLE=n
+CONFIG_BTDM_CTRL_BLE_MAX_CONN=1
+CONFIG_LWIP_MAX_ACTIVE_TCP=4
+CONFIG_LWIP_MAX_LISTENING_TCP=4
+CONFIG_LWIP_MAX_UDP_PCBS=4
+CONFIG_LWIP_MAX_SOCKETS=4

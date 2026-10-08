@@ -1,0 +1,15 @@
+idf_component_register(SRCS "main.c"
+                            "caster.c"
+                            "hal_display.c"
+                            "hal_input.c"
+                            "gfx.c"
+                            "ui_calc.c"
+                            "ui_menu.c"
+                            "ui_wifiscan.c"
+                            "ui_blescan.c"
+                            "svc_wifi.c"
+                            "svc_ble.c"
+                            "svc_resume.c"
+                       INCLUDE_DIRS "."
+                       PRIV_REQUIRES esp_wifi esp_event esp_netif nvs_flash
+                                     driver esp_timer bt)

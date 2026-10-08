@@ -1,0 +1,13 @@
+menu "Hackulator"
+
+    config HACKU_FORCE_CASTER
+        bool "Force caster mode (skip TFT, for headless testing)"
+        default n
+        help
+            When enabled, the TFT is never probed and the device boots
+            straight into caster mode: framebuffer is streamed over
+            UART0 @ 1 Mbaud (PKC protocol) and keys come from the host
+            viewer. Useful when a screen is attached but you want to
+            test through the viewer anyway.
+
+endmenu

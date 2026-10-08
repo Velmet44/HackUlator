@@ -1,0 +1,37 @@
+# Build output (regenerable via `idf.py build`)
+build/
+
+# ESP-IDF generated / downloaded
+managed_components/
+dependencies.lock.tmp/
+sdkconfig
+sdkconfig.old
+sdkconfig.bak
+
+# Component manager cache
+components/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Test / probe screenshots (regenerable via tools/hk_test.py)
+test_out/
+test_mem/
+test_mem2/
+test_mem3/
+test_mem4/
+test_mem5/
+test_mem6/
+tools/probe_*.png
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
