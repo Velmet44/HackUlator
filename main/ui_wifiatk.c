@@ -9,6 +9,7 @@
 #include "svc_deauth.h"
 #include "ui_status.h"
 #include "esp_log.h"
+#include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdio.h>
@@ -59,9 +60,15 @@ static void draw(void) {
     {
         char st[24];
         int y = LIST_Y0 + 84;
-        if (svc_deauth_running() && svc_deauth_tx_error())
-            snprintf(st, sizeof(st), "tx err %d", svc_deauth_tx_error());
-        else if (svc_deauth_running())
+        if (svc_deauth_tx_error()) {
+            /* Stock ESP-IDF refuses mgmt subtypes other than
+             * beacon/probe/action (ESP_ERR_INVALID_ARG). Say so plainly. */
+            if (svc_deauth_tx_error() == (int)ESP_ERR_INVALID_ARG)
+                snprintf(st, sizeof(st), "unsupported by IDF");
+            else
+                snprintf(st, sizeof(st), "tx err %d",
+                         svc_deauth_tx_error());
+        } else if (svc_deauth_running())
             snprintf(st, sizeof(st), "running %lu f",
                      (unsigned long)svc_deauth_frames());
         else
@@ -128,9 +135,12 @@ int ui_wifiatk_key(hacku_key_t k) {
             svc_ble_stop();  /* deauth is WiFi-only */
             int r = svc_deauth_start();
             if (r < 0) {
-                const char *e = r == -1 ? "no target"
-                           : r == -2 ? "wifi init failed"
-                                     : "channel failed";
+                const char *e =
+                    r == -1 ? "no target" :
+                    r == -2 ? "wifi init failed" :
+                    r == -3 ? "channel failed" :
+                    r == -4 ? "wifi restart failed" :
+                    r == -6 ? "IDF rejects mgmt frame" : "start failed";
                 draw_msg("deauth failed", e);
                 vTaskDelay(pdMS_TO_TICKS(1500));
             }
