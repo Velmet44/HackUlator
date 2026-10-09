@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Generate a fixed-cell 1bpp C font header from a TTF using PIL.
 
-Usage: gen_font.py [--ttf PATH] [--size PX] [--out font.h] [--name hacku_font]
+Usage: gen_font.py [--ttf PATH] [--size PX] [--out font_oled.h]
+                   [--name oled_font] [--threshold N]
 Covers printable ASCII (32..126). Cell width = max glyph advance,
-cell height = ascent + descent. Emits hacku_font_t (see gfx.h).
+cell height = ascent + descent. Emits oled_font_t (see oled_gfx.h).
+
+Cross-platform: picks a monospace-bold TTF automatically on Windows,
+Debian and macOS (override with --ttf or HACKU_TTF). If no system font
+is found, falls back to Pillow's bundled font so the script never
+hard-fails for a missing OS package.
+Needs: pip install pillow
 """
 import argparse
 import os
@@ -23,14 +30,18 @@ def find_default_font():
         windir = os.environ.get("SystemRoot", r"C:\Windows")
         cands += [
             os.path.join(windir, "Fonts", "DejaVuSansMono-Bold.ttf"),
-            os.path.join(windir, "Fonts", "consola.ttf"),   # Consolas
+            os.path.join(windir, "Fonts", "consolab.ttf"),   # Consolas Bold
             os.path.join(windir, "Fonts", "courbd.ttf"),    # Courier New Bold
+            os.path.join(windir, "Fonts", "consola.ttf"),   # Consolas regular
             os.path.join(windir, "Fonts", "lucon.ttf"),     # Lucida Console
         ]
     else:
         cands += [
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
             "/usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansMono-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         ]
     # macOS (also useful under Git Bash / MSYS on Windows)
     cands += [
@@ -41,7 +52,25 @@ def find_default_font():
     for c in cands:
         if c and os.path.isfile(c):
             return c
-    return cands[0] if cands else ""
+    return ""
+
+
+def load_font(ttf, size):
+    """System TTF when available, else Pillow's bundled font (any OS)."""
+    if ttf:
+        try:
+            return ImageFont.truetype(ttf, size), ttf
+        except Exception as e:
+            print(f"warning: cannot load {ttf!r}: {e}; trying fallback",
+                  file=sys.stderr)
+    try:
+        # Pillow >= 10.1 ships a scalable bundled font (Aileron-based).
+        return ImageFont.load_default(size=size), "<pillow-bundled>"
+    except TypeError:
+        # Older Pillow: fixed-size bitmap default (small but usable).
+        print("warning: old Pillow, bundled font ignores --size",
+              file=sys.stderr)
+        return ImageFont.load_default(), "<pillow-bundled-bitmap>"
 
 
 def main():
@@ -49,25 +78,23 @@ def main():
     ap.add_argument("--ttf", default=None,
                     help="source TTF (default: auto-detected monospace bold; "
                          "override with HACKU_TTF env)")
-    ap.add_argument("--size", type=int, default=18)
-    ap.add_argument("--out", default="font.h")
-    ap.add_argument("--name", default="hacku_font")
+    ap.add_argument("--size", type=int, default=8)
+    ap.add_argument("--out", default="font_oled.h")
+    ap.add_argument("--name", default="oled_font")
+    ap.add_argument("--threshold", type=int, default=128,
+                    help="grayscale cutoff 0-255 for 1bpp (default 128; "
+                         "lower keeps fainter stem pixels)")
     a = ap.parse_args()
 
+    if a.threshold < 0 or a.threshold > 255:
+        sys.exit("--threshold must be 0..255")
     ttf = a.ttf or find_default_font()
-    if not ttf or not os.path.isfile(ttf):
-        sys.exit(f"TTF not found: {ttf!r}\n"
-                 f"Windows: pass --ttf %SystemRoot%\\Fonts\\consola.ttf\n"
-                 f"Debian:  sudo apt install fonts-dejavu-core, then use\n"
-                 f"         /usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf\n"
-                 f"Or set HACKU_TTF env / pass --ttf PATH.")
-    out_dir = os.path.dirname(os.path.abspath(a.out))
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-    try:
-        font = ImageFont.truetype(ttf, a.size)
-    except Exception as e:
-        sys.exit(f"cannot load font {ttf!r}: {e}")
+    if not ttf:
+        print("warning: no system monospace font found "
+              "(Debian: sudo apt install fonts-dejavu-core); "
+              "using Pillow bundled font", file=sys.stderr)
+    font, used = load_font(ttf, a.size)
+    print(f"source: {used}")
     ascent, descent = font.getmetrics()
     chars = [chr(c) for c in range(FIRST, LAST + 1)]
 
@@ -88,10 +115,13 @@ def main():
         px = img.load()
         for yy in range(chh):
             for xx in range(cw):
-                if px[xx, yy] >= 128:
+                if px[xx, yy] >= a.threshold:
                     bits[yy * stride + xx // 8] |= 1 << (7 - (xx & 7))
         glyphs.append(bits)
 
+    out_dir = os.path.dirname(os.path.abspath(a.out))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     with open(a.out, "w", newline="\n", encoding="utf-8") as f:
         f.write("#pragma once\n\n")
         f.write("/* Auto-generated by tools/gen_font.py — do not hand-edit. */\n")
