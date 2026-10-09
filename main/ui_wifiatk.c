@@ -60,15 +60,9 @@ static void draw(void) {
     {
         char st[24];
         int y = LIST_Y0 + 84;
-        if (svc_deauth_tx_error()) {
-            /* Stock ESP-IDF refuses mgmt subtypes other than
-             * beacon/probe/action (ESP_ERR_INVALID_ARG). Say so plainly. */
-            if (svc_deauth_tx_error() == (int)ESP_ERR_INVALID_ARG)
-                snprintf(st, sizeof(st), "unsupported by IDF");
-            else
-                snprintf(st, sizeof(st), "tx err %d",
-                         svc_deauth_tx_error());
-        } else if (svc_deauth_running())
+        if (svc_deauth_tx_error())
+            snprintf(st, sizeof(st), "tx err %d", svc_deauth_tx_error());
+        else if (svc_deauth_running())
             snprintf(st, sizeof(st), "running %lu f",
                      (unsigned long)svc_deauth_frames());
         else

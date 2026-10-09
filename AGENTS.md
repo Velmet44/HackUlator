@@ -43,6 +43,13 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
 
 ## Hard constraints
 
+* **Injection**: `wsl_bypasser.*` overrides the driver's private
+  `ieee80211_raw_frame_sanity_check()` (which lives in the closed Wi-Fi blob
+  and rejects management subtypes) and `main/CMakeLists.txt` links with
+  `-Wl,-zmuldefs`. **Removing that link flag silently reinstates
+  `ESP_ERR_INVALID_ARG` on every injected frame** — deauth will report
+  `tx err 258` and the counter stays 0. Same technique as Hydra-ESP /
+  risinek, credit them if this is ever redistributed.
 * **Heap**: 150KB FB is permanently resident; largest-free-block is the
   binding metric (pristine ~34K). `heap_ok_or_reboot()` in `ui_*scan.c`
   reboots below 16K — never lower it without on-device proof. Free the

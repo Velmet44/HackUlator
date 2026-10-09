@@ -13,7 +13,7 @@ Target: classic **ESP32-WROOM**, 2.8" **ILI9341 240x320** portrait TFT, 6 button
 - **WiFi scan**: sorted by RSSI; detail shows MAC / RSSI / channel / auth / ciphers / PHY / WPS / FTM / country
 - **BLE scan** (~5 s): deduped by MAC; detail shows name / MAC / RSSI / addr type / adv type / TX / flags / service UUID / manufacturer
 - **Session attack targets**: pick a target from any scan detail view with RIGHT (button flips to green `selected`); stored in RAM only, cleared on reboot. Separate slots for WiFi (keyed by BSSID) and BLE (keyed by MAC).
-- **WiFi attacks → 1. Deauth**: raw broadcast 802.11 deauth flood against the stored target at 100 ms cadence, with a live frame counter. Ported from Hydra-ESP's `wsl_bypasser` frame template (see Credits).
+- **WiFi attacks → 1. Deauth**: raw broadcast 802.11 deauth flood against the stored target at 100 ms cadence, with a live frame counter. Works on **stock ESP-IDF** via a WSL bypass (`wsl_bypasser.*`: overrides the driver's private frame-type gate + `-Wl,-zmuldefs`), because stock `esp_wifi_80211_tx()` rejects management frames.
 - Entry guards: choosing an attack with no target — or a target that has vanished — shows a message and redirects to the scan page
 - One radio at a time (WiFi torn down before BLE and vice versa); full teardown on lock (stealth + power)
 - ILI9341 auto-detect (RDDID); falls back to **caster mode** when no TFT answers

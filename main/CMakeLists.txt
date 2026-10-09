@@ -15,6 +15,12 @@ idf_component_register(SRCS "main.c"
                             "svc_target.c"
                             "svc_deauth.c"
                             "svc_resume.c"
+                            "wsl_bypasser.c"
                        INCLUDE_DIRS "."
                        PRIV_REQUIRES esp_wifi esp_event esp_netif nvs_flash
                                      driver esp_timer bt)
+
+# WSL bypass: let our ieee80211_raw_frame_sanity_check override the copy in
+# the closed Wi-Fi binary. Without -zmuldefs the duplicate symbol is dropped
+# and esp_wifi_80211_tx() keeps rejecting deauth frames with INVALID_ARG.
+target_link_libraries(${COMPONENT_LIB} -Wl,-zmuldefs)
