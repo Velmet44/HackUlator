@@ -17,6 +17,8 @@
 #define ROW_H 30
 #define LIST_Y0 52
 
+static int s_timed_out = 0; /* last run ended on its own 3-min timeout */
+
 static void draw_msg(const char *l1, const char *l2) {
     hacku_fb_t *fb = hacku_display_fb();
     gfx_fill_rect(fb, 0, 0, HACKU_DISP_W, HACKU_DISP_H, C_BLACK);
@@ -56,15 +58,19 @@ static void draw(void) {
                  C_WHITE, -1, 1);
         (void)sel;
     }
-    /* Live status. */
+    /* Live status: rate, cumulative frames, time left. */
     {
-        char st[24];
+        char st[32];
         int y = LIST_Y0 + 84;
         if (svc_deauth_tx_error())
             snprintf(st, sizeof(st), "tx err %d", svc_deauth_tx_error());
         else if (svc_deauth_running())
-            snprintf(st, sizeof(st), "running %lu f",
-                     (unsigned long)svc_deauth_frames());
+            snprintf(st, sizeof(st), "%lu/s %lu f  %lu s",
+                     (unsigned long)svc_deauth_fps(),
+                     (unsigned long)svc_deauth_frames(),
+                     (unsigned long)svc_deauth_remaining_s());
+        else if (s_timed_out)
+            snprintf(st, sizeof(st), "done - timed out");
         else
             snprintf(st, sizeof(st), "idle");
         int sw = gfx_text_w(&hacku_font, st, 1);
@@ -94,15 +100,23 @@ static void draw(void) {
 int ui_wifiatk_tick(void) {
     /* NOTE: caster mode silences the log bus, so nothing may be inferred
      * from missing logs here. */
+    /* Auto-stop: the TX callback only raises the expired flag; stop here,
+     * outside the timer, and remember that it ended on its own. */
+    if (svc_deauth_running() && svc_deauth_expired()) {
+        s_timed_out = 1;
+        svc_deauth_stop();
+    }
     if (!svc_deauth_running())
         return 0;
     hacku_fb_t *fb = hacku_display_fb();
-    char st[24];
+    char st[32];
     if (svc_deauth_tx_error())
         snprintf(st, sizeof(st), "tx err %d", svc_deauth_tx_error());
     else
-        snprintf(st, sizeof(st), "running %lu f",
-                 (unsigned long)svc_deauth_frames());
+        snprintf(st, sizeof(st), "%lu/s %lu f  %lu s",
+                 (unsigned long)svc_deauth_fps(),
+                 (unsigned long)svc_deauth_frames(),
+                 (unsigned long)svc_deauth_remaining_s());
     int sw = gfx_text_w(&hacku_font, st, 1);
     /* Erase the band, then redraw centred. */
     gfx_fill_rect(fb, 0, 130, HACKU_DISP_W, 30, C_BLACK);
@@ -113,6 +127,7 @@ int ui_wifiatk_tick(void) {
 }
 
 void ui_wifiatk_run(void) {
+    s_timed_out = 0; /* entering the screen clears a stale timeout note */
     draw();
     hacku_input_drain();
 }
@@ -125,7 +140,9 @@ int ui_wifiatk_key(hacku_key_t k) {
     if (k == KEY_OK) {
         if (svc_deauth_running()) {
             svc_deauth_stop();
+            s_timed_out = 0;
         } else {
+            s_timed_out = 0;
             svc_ble_stop();  /* deauth is WiFi-only */
             int r = svc_deauth_start();
             if (r < 0) {

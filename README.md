@@ -13,7 +13,7 @@ Target: classic **ESP32-WROOM**, 2.8" **ILI9341 240x320** portrait TFT, 6 button
 - **WiFi scan**: sorted by RSSI; detail shows MAC / RSSI / channel / auth / ciphers / PHY / WPS / FTM / country
 - **BLE scan** (~5 s): deduped by MAC; detail shows name / MAC / RSSI / addr type / adv type / TX / flags / service UUID / manufacturer
 - **Session attack targets**: pick a target from any scan detail view with RIGHT (button flips to green `selected`); stored in RAM only, cleared on reboot. Separate slots for WiFi (keyed by BSSID) and BLE (keyed by MAC).
-- **WiFi attacks → 1. Deauth**: raw broadcast 802.11 deauth flood against the stored target at 100 ms cadence, with a live frame counter. Works on **stock ESP-IDF** via a WSL bypass (`wsl_bypasser.*`: overrides the driver's private frame-type gate + `-Wl,-zmuldefs`), because stock `esp_wifi_80211_tx()` rejects management frames.
+- **WiFi attacks → 1. Deauth**: raw broadcast 802.11 deauth flood against the stored target at 100 ms cadence. Live status shows frames/sec, cumulative frames and time remaining. **Auto-stops after 3 minutes** (`DEAUTH_TIMEOUT_S`) so a forgotten run cannot jam the channel indefinitely. Works on **stock ESP-IDF** via a WSL bypass (`wsl_bypasser.*`: overrides the driver's private frame-type gate + `-Wl,-zmuldefs`), because stock `esp_wifi_80211_tx()` rejects management frames.
 - Entry guards: choosing an attack with no target — or a target that has vanished — shows a message and redirects to the scan page
 - One radio at a time (WiFi torn down before BLE and vice versa); full teardown on lock (stealth + power)
 - ILI9341 auto-detect (RDDID); falls back to **caster mode** when no TFT answers
@@ -103,6 +103,10 @@ AGENTS.md        repo conventions, build commands, hard constraints
 **"low mem XXK reboot".** The 150 KB RGB565 framebuffer stays resident and ESP32 WiFi/Bluedroid `deinit` leaves ~10-15 KB of heap residue per radio switch (fragmentation of the *largest contiguous* block, not total free). Pristine boot shows ~34K largest free; after several WiFi↔BLE round-trips it drops under the 16 K bring-up floor, so the device cleanly reboots into the requested scan instead of asserting. The `XXK` on the `scanning...` screen is that meter.
 
 **Headless units have no logs.** Caster mode silences the log bus (log bytes would corrupt the PKC rect stream), so a headless device looks silent on a 115200 monitor by design. Use the TFT for on-device log output, or add targeted pixel-visible diagnostics.
+
+**Deauth is 2.4 GHz only.** The ESP32 cannot touch 5 GHz, so a client on `SSID-5G` is unaffected even while the flood runs. Target the 2.4 GHz SSID and confirm the client is on that band.
+
+**Deauth floods everything on the channel.** The frames are broadcast, so unrelated devices on the same channel (including neighbours') will also be dropped. Keep runs short and test away from others.
 
 ## Credits
 

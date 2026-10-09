@@ -18,6 +18,11 @@ static volatile int s_tx_errcode = 0;
 static volatile uint32_t s_ticks = 0; /* TX callback invocations */
 static volatile int s_last_err = 0;
 static volatile int s_beacon_ok = 0;  /* driver accepts beacon frames? */
+static int64_t s_started_us = 0;      /* run start, for timeout + elapsed */
+static volatile int s_expired = 0;     /* timeout reached; owner must stop */
+static volatile uint32_t s_fps = 0;   /* smoothed frames/second */
+static uint32_t s_win_frames = 0;     /* fps window bookkeeping */
+static int64_t s_win_us = 0;
 
 #define DEAUTH_PERIOD_US 100000 /* Hydra-ESP broadcast cadence */
 
@@ -52,6 +57,26 @@ static void tx_tick(void *arg) {
         s_tx_err = 1;
         s_tx_errcode = (int)err;
     }
+
+    /* Frame rate over a ~1 s window. */
+    int64_t now = esp_timer_get_time();
+    if (s_win_us == 0) {
+        s_win_us = now;
+        s_win_frames = s_frames;
+    }
+    int64_t d = now - s_win_us;
+    if (d >= 1000000) {
+        s_fps = (uint32_t)(((uint64_t)(s_frames - s_win_frames) * 1000000ULL) /
+                           (uint64_t)d);
+        s_win_us = now;
+        s_win_frames = s_frames;
+    }
+
+    /* Auto-stop flag. The timer cannot delete itself from its own
+     * callback, so only raise the flag; the owner stops the attack. */
+    if (!s_expired &&
+        (uint64_t)(now - s_started_us) >= (uint64_t)DEAUTH_TIMEOUT_S * 1000000ULL)
+        s_expired = 1;
 }
 
 /* Probe: send one frame and report what the driver says. TX goes through
@@ -96,6 +121,11 @@ int svc_deauth_start(void) {
     s_tx_errcode = 0;
     s_ticks = 0;
     s_last_err = 0;
+    s_expired = 0;
+    s_fps = 0;
+    s_win_frames = 0;
+    s_win_us = 0;
+    s_started_us = esp_timer_get_time();
     esp_timer_create_args_t a = {
         .callback = tx_tick,
         .name = "deauth",
@@ -131,3 +161,21 @@ int svc_deauth_tx_error(void) { return s_tx_errcode; }
 uint32_t svc_deauth_ticks(void) { return s_ticks; }
 
 int svc_deauth_beacon_ok(void) { return s_beacon_ok; }
+
+int svc_deauth_expired(void) { return s_expired; }
+
+uint32_t svc_deauth_fps(void) { return s_fps; }
+
+uint32_t svc_deauth_elapsed_s(void) {
+    if (!s_timer)
+        return 0;
+    return (uint32_t)((uint64_t)(esp_timer_get_time() - s_started_us) /
+                      1000000ULL);
+}
+
+uint32_t svc_deauth_remaining_s(void) {
+    if (!s_timer)
+        return 0;
+    uint32_t e = svc_deauth_elapsed_s();
+    return e >= DEAUTH_TIMEOUT_S ? 0 : DEAUTH_TIMEOUT_S - e;
+}

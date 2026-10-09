@@ -27,9 +27,13 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   guards (no target / target gone → caller must show scan page).
   `svc_deauth.*` — WiFi deauth flood (100 ms esp_timer TX loop,
   `esp_wifi_80211_tx`). `ui_wifiatk_tick()` repaints only the status band;
-  main loop calls it every 500 ms. `main.c:enter_menu_item()` owns every
-  menu transition and MUST call `svc_deauth_stop()` before any radio
-  teardown (an orphan TX timer breaks the next verify scan).
+  main loop calls it every 500 ms. It is also where the auto-stop is
+  honoured: the TX callback only sets `svc_deauth_expired()` (a timer must
+  not delete itself from its own callback), the tick calls
+  `svc_deauth_stop()`. Timeout is `DEAUTH_TIMEOUT_S` (180 s).
+  `main.c:enter_menu_item()` owns every menu transition and MUST call
+  `svc_deauth_stop()` before any radio teardown (an orphan TX timer breaks
+  the next verify scan).
 * `ui_status.*` — bottom bar `"34K W:abc B:def"` (free KB + targets).
   Calculator has no bar (disguise); detail views keep action footers.
 * `svc_wifi.c` / `svc_ble.c` — lazy radio bring-up, full teardown on stop.
