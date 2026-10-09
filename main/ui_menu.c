@@ -9,12 +9,13 @@
 
 static const char *s_title;
 static const char * const *s_items;
-static int s_n, s_sel;
+static int s_n, s_sel, s_top;
 
 #define ROW_H 9
-/* Five items at 10,19,28,37,46: the last row ends at y=54 and the footer
- * starts at y=55. Do not raise LIST_Y0 without re-checking that fit. */
-#define LIST_Y0 10
+/* Rows occupy y=10..54 (45 px) => 5 visible at ROW_H 9. Longer lists scroll:
+ * s_top keeps s_sel inside the window. The footer owns y=55..63. */
+#define LIST_Y0     10
+#define LIST_VISIBLE ((OLED_H - 9 - LIST_Y0) / ROW_H)
 
 static void draw(void) {
     oled_fb_t *fb = hal_oled_fb();
@@ -22,10 +23,13 @@ static void draw(void) {
     int tw = oled_text_w(&oled_font, s_title);
     oled_text(fb, &oled_font, (OLED_W - tw) / 2, 0, s_title, 1);
     oled_hline(fb, 0, 9, OLED_W, 1);
-    for (int i = 0; i < s_n; i++) {
+    int nvis = s_n < LIST_VISIBLE ? s_n : LIST_VISIBLE;
+    for (int i = 0; i < nvis; i++) {
+        int idx = s_top + i;
         int y = LIST_Y0 + i * ROW_H;
+        const char *label = s_items[idx];
         char buf[32];
-        snprintf(buf, sizeof(buf), "%d. %s", i + 1, s_items[i]);
+        snprintf(buf, sizeof(buf), "%d. %s", idx + 1, label);
         buf[31] = 0;
         int bw = oled_text_w(&oled_font, buf);
         int bx = 4;
@@ -34,10 +38,10 @@ static void draw(void) {
             buf[OLED_W / oled_font.w - 2] = 0;
             bw = oled_text_w(&oled_font, buf);
         }
-        if (i == s_sel) {
+        if (idx == s_sel) {
             oled_fill_rect(fb, 0, y, OLED_W, ROW_H, 1);
         }
-        oled_text(fb, &oled_font, bx, y, buf, i == s_sel ? 0 : 1);
+        oled_text(fb, &oled_font, bx, y, buf, idx == s_sel ? 0 : 1);
     }
     {
         /* Single footer line: mem + targets + boot cause (32 cells max). */
@@ -57,7 +61,26 @@ void ui_menu_enter(const char *title, const char * const *items, int n) {
     s_items = items;
     s_n = n;
     s_sel = 0;
+    s_top = 0;
     draw();
+}
+
+/* Scroll the window so the cursor stays visible. Wrapping means s_top must
+ * be recomputed rather than nudged, or a wrap from the last row to the
+ * first would leave the cursor off-screen. */
+static void scroll_to_sel(void) {
+    if (s_sel < s_top) {
+        s_top = s_sel;
+    }
+    if (s_sel >= s_top + LIST_VISIBLE) {
+        s_top = s_sel - LIST_VISIBLE + 1;
+    }
+    if (s_top > s_n - LIST_VISIBLE) {
+        s_top = s_n - LIST_VISIBLE;
+    }
+    if (s_top < 0) {
+        s_top = 0;
+    }
 }
 
 int ui_menu_key(hacku_key_t k) {
@@ -65,9 +88,11 @@ int ui_menu_key(hacku_key_t k) {
     switch (k) {
         case KEY_UP:
             s_sel = (s_sel + s_n - 1) % s_n;
+            scroll_to_sel();
             break;
         case KEY_DOWN:
             s_sel = (s_sel + 1) % s_n;
+            scroll_to_sel();
             break;
         case KEY_OK:
             rc = s_sel;

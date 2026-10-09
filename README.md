@@ -1,6 +1,6 @@
 # HackUlator
 
-ESP32 wardriving-style scanner disguised as a calculator. Boots into a working calculator; entering `4+6=` unlocks a hidden menu with **WiFi scan**, **BLE scan**, **WiFi attacks**, **BLE attacks** and a passive **RX monitor** (scrollable lists + detail screens).
+ESP32 wardriving-style scanner disguised as a calculator. Boots into a working calculator; entering `4+6=` unlocks a hidden menu with **WiFi scan**, **BLE scan**, **WiFi attacks**, **BLE attacks**, **WiFi passive** and **BLE passive** (scrollable lists + detail screens).
 
 Target: classic **ESP32-WROOM**, 0.96" **SSD1306 128x64 OLED** (I2C), 6 buttons. The mono UI is mirrored over USB serial to a PC viewer.
 
@@ -27,7 +27,9 @@ Target: classic **ESP32-WROOM**, 0.96" **SSD1306 128x64 OLED** (I2C), 6 buttons.
   The attacks screen shows live counters in the bottom band: frames TXed (`f…`) plus, for beacon spam, live fake APs and the chosen list (`f… a20 COMMON`).
   Live status shows the mode, frames/sec and time remaining. Works on **stock ESP-IDF** via a WSL bypass (`wsl_bypasser.*`: overrides the driver's private frame-type gate + `-Wl,-zmuldefs`), because stock `esp_wifi_80211_tx()` rejects management frames.
 - Entry guards: choosing an attack that needs a target when none is set — or one that has vanished — shows a message and redirects to the scan page. The check runs when the attack is **launched**, not when the attacks screen is opened, so self-targeting modes (beacon spam) never trigger a scan
-- **RX monitor** (passive): promiscuous mode, counts the 802.11 frames the chip overhears — live frames/sec, total, management vs data split, strongest RSSI. Joins nothing, sends nothing, needs no target. This is the half the scanner was missing: `WiFi scan` only samples beacons during an active scan and drops the traffic in between
+- **WiFi passive** → **RX monitor**: promiscuous mode, counts the 802.11 frames the chip overhears — live frames/sec, total, management vs data split, strongest RSSI. Joins nothing, sends nothing, needs no target. This is the half the scanner was missing: `WiFi scan` only samples beacons during an active scan and drops the traffic in between
+- **BLE passive**: counts BLE advertisements on a `BLE_SCAN_TYPE_PASSIVE` scan with a random own address, so it never answers a `SCAN_REQ` and the monitor itself is not identifiable. Ads/sec, total, strongest RSSI
+- Both passive screens are listen-only and hold no records — no pcap, no handshake capture, no probe harvesting
 - One radio at a time (WiFi torn down before BLE and vice versa); full teardown on lock (stealth + power)
 - SSD1306 probe at boot (I2C 0x3C/0x3D); without an OLED the device still runs caster-only
 - PKC dirty-rect caster mirror (always on): mono OLED pixels expanded to RGB565 white/black over UART0 @ 460800 baud + remote keys from viewer
@@ -85,7 +87,7 @@ All Python tools accept `--port` (auto-detected if omitted) and work on Windows 
 | `hacku_viewer.py` | Live display viewer (Tkinter + Pillow), remote key injection |
 | `hk_test.py` | Headless end-to-end verifier (calculator, unlock, scans, relock) |
 | `hk_test_deauth.py` | Deauth flow verifier (target select → run → counter → stop) |
-| `hk_test_rx.py` | RX monitor verifier (unlock → open → counters must move → BACK) |
+| `hk_test_rx.py` | Passive verifiers (menu scroll → WiFi passive submenu → RX monitor → BACK → BLE passive) |
 | `hk_log.py` | Capture one boot log over UART0 @ 115200 |
 | `hk_wire.py` | Drive the UI and report which caster rects hit the wire |
 | `hk_px.py` / `hk_anchor.py` / `hk_palette.py` | Framebuffer pixel inspection / colour anchors / palette dump |
@@ -103,8 +105,9 @@ Screenshots land in `test_out/`, `test_deauth/` (gitignored — throwaway).
 ## Repo layout
 
 ```text
-main/            firmware: ui_* screens, svc_wifi/svc_ble/svc_target/svc_deauth/svc_resume/
-                svc_sniff, hal_oled/hal_input, caster, oled_gfx, font_oled
+main/            firmware: ui_* screens (incl. ui_wifipassive/ui_sniff/ui_blepassive),
+                svc_wifi/svc_ble/svc_target/svc_deauth/svc_resume/svc_sniff,
+                hal_oled/hal_input, caster, oled_gfx, font_oled
 tools/           viewer + headless verifiers + pixel/log probes
 firmware/        flashable pack (bootloader + partition-table + app + flash scripts)
 CMakeLists.txt   partitions.csv   sdkconfig.defaults   dependencies.lock
@@ -117,7 +120,9 @@ AGENTS.md        repo conventions, build commands, hard constraints
 
 **No logs while the caster runs.** The caster mirror is always on and silences the log bus (log bytes would corrupt the PKC rect stream), so the device looks silent on a 115200 monitor by design. Only early boot logs (before the caster starts) are visible. Use the viewer or on-OLED diagnostics.
 
-**RX counts are relative, not absolute.** The promiscuous callback in `svc_sniff.c` is deliberately count-only — it holds one of just six static RX buffers per frame, so queuing payloads is not an option and the driver gives no drop counter. The frames/sec number is enough to see traffic appear and disappear, but it is not a claim about how much was captured. Against an idle network it reads 0 from the start and tells you nothing.
+**Passive counts are relative, not absolute.** The WiFi promiscuous callback in `svc_sniff.c` is deliberately count-only — it holds one of just six static RX buffers per frame, so queuing payloads is not an option, and the ESP-IDF driver gives no RX-drop counter. The BLE counter has the same caveat. Both are enough to see traffic or adverts appear and disappear, but neither is a claim about how much was captured. Against a completely idle network the WiFi rate reads 0 from the start; in a room with no BLE devices nearby the BLE screen reads 0 the whole time.
+
+**Passive is not invisible.** "Passive" here means the device does not transmit: no injected frames, no `SCAN_REQ`, no probe responses, no association. It is not anonymity — the ESP32 still radiates its own management frames, and the passive BLE scan uses a random address that changes per session but is still a radio that is visibly present. Do not rely on these modes to avoid detection.
 
 **Deauth is 2.4 GHz only.** The ESP32 cannot touch 5 GHz, so a client on `SSID-5G` is unaffected even while the flood runs. Target the 2.4 GHz SSID and confirm the client is on that band.
 

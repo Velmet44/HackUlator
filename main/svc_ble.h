@@ -29,3 +29,15 @@ int svc_ble_scan(ble_dev_t *out, int max, int seconds);
 
 /* Full radio teardown. Safe to call when already stopped. */
 void svc_ble_stop(void);
+
+/* ---- passive advert monitor ----
+ * Listens without answering: BLE_SCAN_TYPE_PASSIVE sends no SCAN_REQ, and a
+ * random own address keeps the monitor itself unidentifiable. Counters only
+ * - no dedupe, no list, no records retained.
+ * 0 ok; <0 stage code (-10..-15 bring-up, -16 scan params, -3 start). */
+int  svc_ble_passive_start(void);
+void svc_ble_passive_stop(void);
+int  svc_ble_passive_running(void);
+uint32_t svc_ble_adv_total(void);   /* adverts since start */
+uint32_t svc_ble_adv_tick(void);    /* call ~1/s; returns adverts in last 1 s */
+int  svc_ble_adv_best_rssi(void);   /* strongest dBm, 0 when nothing heard */

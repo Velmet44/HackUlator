@@ -65,16 +65,23 @@ def main():
     check("unlocked to menu", d.has_bar())
     shot("rx_00_menu.png")
 
-    print("== navigate to RX monitor (item 5) ==", flush=True)
+    print("== navigate to WiFi passive (item 5) ==", flush=True)
     for _ in range(4):
         d.key("s")
     d.pump(0.4)
     shot("rx_01_selected.png")
+    check("menu reached item 5", d.has_bar())
+
+    print("== open WiFi passive submenu ==", flush=True)
+    d.key("e")
+    d.pump(1.0)
+    check("submenu opened", d.has_bar())
+    shot("rx_02_submenu.png")
 
     print("== enter RX monitor ==", flush=True)
     d.key("e")
     d.pump(2.0)
-    shot("rx_02_enter.png")
+    shot("rx_03_enter.png")
 
     # The device draws the screen once on entry, then repaints the counter
     # block every 500 ms. Sample twice: a live counter must differ.
@@ -86,15 +93,38 @@ def main():
         seen.add(fp)
         print("   sample %d sig=%08x" % (i, fp), flush=True)
         if i in (1, 3):
-            shot("rx_03_live_%d.png" % i)
+            shot("rx_04_live_%d.png" % i)
     check("screen repaints repeatedly (%d/%d distinct)"
           % (len(seen), 6), len(seen) >= 2)
 
-    print("== BACK exits to menu ==", flush=True)
+    print("== BACK returns to WiFi passive submenu ==", flush=True)
     d.key("b")
     d.pump(1.0)
-    check("back returns to menu", d.has_bar())
-    shot("rx_04_back.png")
+    check("back to submenu", d.has_bar())
+    shot("rx_05_submenu_back.png")
+
+    print("== BACK again returns to top menu ==", flush=True)
+    d.key("b")
+    d.pump(1.0)
+    check("back to menu", d.has_bar())
+    shot("rx_06_menu.png")
+
+    print("== BLE passive (item 6, needs menu scroll) ==", flush=True)
+    # show_menu() resets the cursor to item 0 on every menu entry, so count
+    # DOWN presses from zero. Item 6 is off-window, which also exercises the
+    # scrolling list.
+    for _ in range(5):
+        d.key("s")
+    d.pump(0.4)
+    shot("rx_07_menu_scrolled.png")
+    d.key("e")
+    d.pump(4.0)
+    shot("rx_08_blepassive.png")
+    d.pump(2.5)
+    shot("rx_09_blepassive_live.png")
+    d.key("b")
+    d.pump(1.5)
+    check("back from BLE passive", d.has_bar())
 
     print("")
     if fails:

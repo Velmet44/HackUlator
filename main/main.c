@@ -14,6 +14,8 @@
 #include "svc_resume.h"
 #include "svc_sniff.h"
 #include "ui_sniff.h"
+#include "ui_blepassive.h"
+#include "ui_wifipassive.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
@@ -31,16 +33,19 @@ typedef enum {
     SCR_BLESCAN,
     SCR_WIFIATK,
     SCR_BLEATK,
+    SCR_WIFIPASSIVE,
     SCR_SNIFF,
+    SCR_BLEPASSIVE,
 } screen_t;
 
 static const char *MENU_ITEMS[] = {
-    "WiFi scan", "BLE scan", "WiFi attacks", "BLE attacks", "RX monitor",
+    "WiFi scan", "BLE scan", "WiFi attacks", "BLE attacks",
+    "WiFi passive", "BLE passive",
 };
-#define MENU_N 5
+#define MENU_N 6
 
 static int64_t s_last_atk_tick = 0; /* live-attack status repaint (ms) */
-static int64_t s_last_sniff_tick = 0; /* RX monitor counter repaint (ms) */
+static int64_t s_last_sniff_tick = 0; /* passive counter repaint (ms) */
 
 static void show_menu(void) {
     ui_menu_enter("HACKULATOR", MENU_ITEMS, MENU_N);
@@ -87,13 +92,24 @@ static int enter_menu_item(int sel, screen_t *screen_out) {
         ui_bleatk_run();
         return 1;
     }
-    if (sel == 4) {                       /* passive RX monitor */
+    if (sel == 4) {                       /* WiFi passive submenu */
         svc_deauth_stop();
+        svc_ble_passive_stop();
+        svc_sniff_stop();
         svc_ble_stop();
         /* Radio stays up: promiscuous RX shares the STA path, so no
          * teardown here - that is the whole point of a passive monitor. */
-        *screen_out = SCR_SNIFF;
-        ui_sniff_run();
+        *screen_out = SCR_WIFIPASSIVE;
+        ui_wifipassive_run();
+        return 1;
+    }
+    if (sel == 5) {                       /* BLE passive monitor */
+        svc_deauth_stop();
+        svc_sniff_stop();
+        svc_ble_stop();
+        /* ui_blepassive_run() tears WiFi down itself: BT needs the heap. */
+        *screen_out = SCR_BLEPASSIVE;
+        ui_blepassive_run();
         return 1;
     }
     return 0;
@@ -158,6 +174,7 @@ void app_main(void) {
                     screen = SCR_CALC;
                     svc_deauth_stop(); /* TX timer must die before radio */
                     svc_sniff_stop();  /* RX callback must die before radio */
+                    svc_ble_passive_stop(); /* BT scan must die before radio */
                     svc_wifi_teardown(); /* radios off + heap freed */
                     svc_ble_stop();
                     ui_wifiscan_drop(); /* free scan lists so the next
@@ -212,8 +229,25 @@ void app_main(void) {
                     screen = SCR_MENU;
                     show_menu();
                 }
+            } else if (screen == SCR_WIFIPASSIVE) {
+                int r = ui_wifipassive_key(k);
+                if (r == WIFIPASS_EXIT_MENU) {
+                    screen = SCR_MENU;
+                    show_menu();
+                } else if (r == WIFIPASS_OPEN_RX) {
+                    screen = SCR_SNIFF;
+                    ui_sniff_run();
+                }
             } else if (screen == SCR_SNIFF) {
+                /* BACK from a monitor goes to its submenu when there is
+                 * one, so the user can reach the sibling passive tools
+                 * without walking the whole top menu again. */
                 if (ui_sniff_key(k) == SNIFF_EXIT_MENU) {
+                    screen = SCR_WIFIPASSIVE;
+                    ui_wifipassive_run();
+                }
+            } else if (screen == SCR_BLEPASSIVE) {
+                if (ui_blepassive_key(k) == BLEPASS_EXIT_MENU) {
                     screen = SCR_MENU;
                     show_menu();
                 }
@@ -230,11 +264,12 @@ void app_main(void) {
             }
         }
         /* Live counters for the passive RX monitor (paced, cheap). */
-        if (screen == SCR_SNIFF) {
+        if (screen == SCR_SNIFF || screen == SCR_BLEPASSIVE) {
             int64_t now_ms = esp_timer_get_time() / 1000;
             if (now_ms - s_last_sniff_tick >= 500) {
                 s_last_sniff_tick = now_ms;
                 ui_sniff_tick();
+                ui_blepassive_tick();
             }
         }
         if (unlocked &&
@@ -243,6 +278,7 @@ void app_main(void) {
             screen = SCR_CALC;
             svc_deauth_stop();
             svc_sniff_stop();
+            svc_ble_passive_stop();
             svc_wifi_teardown();
             svc_ble_stop();
             ui_wifiscan_drop();

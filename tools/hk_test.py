@@ -232,10 +232,14 @@ class Dev:
                     n += 1
         return n
 
-    def has_bar(self, y0=12, y1=48):
-        # full-width inverted selection bar anywhere in the band: a menu,
+    def has_bar(self, y0=10, y1=55):
+        # Full-width inverted selection bar anywhere in the band: a menu,
         # scan list or attack list is on screen (calculator never has one;
         # its keypad cursor cell is only 30px wide).
+        #
+        # The band covers the WHOLE list area, y=10..54. It used to stop at
+        # 48, which was fine for a 4-item menu but could not see the bar on
+        # a scrolled 6-item menu's lower rows - a silent false negative.
         for y in range(max(0, y0), min(y1, H) - 8):
             if self.count_white(y, y + 9) >= 600:
                 return True

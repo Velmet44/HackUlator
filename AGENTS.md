@@ -47,9 +47,10 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   not delete itself from its own callback), the tick calls
   `svc_deauth_stop()`. Timeout is `DEAUTH_TIMEOUT_S` (180 s).
   `main.c:enter_menu_item()` owns every menu transition and MUST call
-  `svc_deauth_stop()` and `svc_sniff_stop()` before any radio teardown (an
-  orphan TX timer breaks the next verify scan; a live promiscuous callback
-  faults on a deinitialised driver). The relock and idle paths in
+  `svc_deauth_stop()`, `svc_sniff_stop()` and `svc_ble_passive_stop()`
+  before any radio teardown (an orphan TX timer breaks the next verify
+  scan; a live promiscuous callback faults on a deinitialised driver; a
+  live BT scan leaks the controller). The relock and idle paths in
   `app_main()` must do the same.
 * **RX callback is count-only.** `svc_sniff.c`'s `rx_cb` runs on the WiFi
   task and holds one of only `CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM` (6) RX
@@ -57,8 +58,10 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   call `ESP_LOG*` (it stalls the WiFi task). The IDF driver exposes no
   RX-drop counter, so the displayed rate is a **relative** figure — enough
   for "traffic appeared / disappeared", never a completeness claim.
-  `ui_menu.c` `LIST_Y0` is capped by this: 5 items at ROW_H 9 must end by
-  y=54 to clear the footer at y=55.
+  `ui_menu.c` `LIST_Y0` is capped by this: rows fill y=10..54, so
+  `LIST_VISIBLE` is 5 at ROW_H 9 and the top menu (6 items) scrolls via
+  `scroll_to_sel()`. Adding a 7th menu entry needs no layout change, but
+  verify the scroll window reaches the last row.
 * `ui_status.*` — bottom bar `"34K W:abc B:def"` (free KB + targets).
   Calculator has no bar (disguise); detail views keep action footers.
 * `svc_wifi.c` / `svc_ble.c` — lazy radio bring-up, full teardown on stop.
@@ -67,7 +70,13 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
 * `svc_resume.c` — persists a pending scan across `esp_restart()` (RTC
   NOINIT) for the low-heap reboot path.
 * `svc_sniff.*` — passive promiscuous RX (count only, see hard constraints).
-  `ui_sniff.*` — the "RX monitor" screen.
+  `ui_sniff.*` — the RX monitor screen, reached through `ui_wifipassive.*`
+  (the "WiFi passive" submenu — deliberately its own widget, not a nested
+  `ui_menu_enter()`, whose single module-level cursor the submenu would
+  clobber on the way back). `ui_blepassive.*` is the BLE counterpart,
+  counting adverts via `svc_ble_passive_*` (`BLE_SCAN_TYPE_PASSIVE` +
+  random own address, so it never answers a SCAN_REQ and is not
+  identifiable).
 * `hal_oled.*` (1KB static mono page FB, SSD1306+caster flush),
   `hal_input.*`
   (6 buttons + caster keys, `KEY_RELOCK` on OK+BACK hold / 3x BACK),
