@@ -2,7 +2,7 @@
 
 ESP32 wardriving-style scanner disguised as a calculator. Boots into a working calculator; entering `4+6=` unlocks a hidden menu with **WiFi scan**, **BLE scan**, **WiFi attacks** and **BLE attacks** (scrollable lists + detail screens).
 
-Target: classic **ESP32-WROOM**, 2.8" **ILI9341 240x320** portrait TFT, 6 buttons. Runs headless too — the display is streamed over USB serial to a PC viewer.
+Target: classic **ESP32-WROOM**, 0.96" **SSD1306 128x64 OLED** (I2C), 6 buttons. The mono UI is mirrored over USB serial to a PC viewer.
 
 > **Legal / scope.** Educational lab tool for networks and devices you own or have written permission to test. Running 802.11 injection or BLE advertising attacks against third-party infrastructure is illegal in most jurisdictions (CFAA, UK Computer Misuse Act, IT Act 2000/2008, equivalents elsewhere). The attack modules here are for your own test gear.
 
@@ -12,7 +12,7 @@ Target: classic **ESP32-WROOM**, 2.8" **ILI9341 240x320** portrait TFT, 6 button
 - Unlock with `4+6=`, relock with OK+BACK hold (2 s), 3x BACK, or 5-min idle
 - **WiFi scan**: sorted by RSSI; detail shows MAC / RSSI / channel / auth / ciphers / PHY / WPS / FTM / country
 - **BLE scan** (~5 s): deduped by MAC; detail shows name / MAC / RSSI / addr type / adv type / TX / flags / service UUID / manufacturer
-- **Session attack targets**: pick a target from any scan detail view with RIGHT (button flips to green `selected`); stored in RAM only, cleared on reboot. Separate slots for WiFi (keyed by BSSID) and BLE (keyed by MAC).
+- **Session attack targets**: pick a target from any scan detail view with RIGHT (footer flips to `selected`); stored in RAM only, cleared on reboot. Separate slots for WiFi (keyed by BSSID) and BLE (keyed by MAC).
 - **WiFi attacks** (UP/DOWN selects, OK runs, 100 ms cadence, 3-minute auto-stop):
   1. **Deauth** — subtype `0xC`, reason 2. Works pre-authentication.
   2. **Disassoc** — subtype `0xA`, reason 1. Only meaningful to an already-associated client.
@@ -20,17 +20,16 @@ Target: classic **ESP32-WROOM**, 2.8" **ILI9341 240x320** portrait TFT, 6 button
   Live status shows the mode, frames/sec and time remaining. Works on **stock ESP-IDF** via a WSL bypass (`wsl_bypasser.*`: overrides the driver's private frame-type gate + `-Wl,-zmuldefs`), because stock `esp_wifi_80211_tx()` rejects management frames.
 - Entry guards: choosing an attack with no target — or a target that has vanished — shows a message and redirects to the scan page
 - One radio at a time (WiFi torn down before BLE and vice versa); full teardown on lock (stealth + power)
-- ILI9341 auto-detect (RDDID); falls back to **caster mode** when no TFT answers
-- PKC dirty-rect caster: framebuffer regions over UART0 @ 460800 baud + remote keys from viewer
-- Shared bottom status bar: free heap KB plus WiFi/BLE target prefixes (`34K W:abc B:def`)
-- Boot-cause footer on menu (`PWRON/EXT/SW/PANIC/BROWN/...`)
+- SSD1306 probe at boot (I2C 0x3C/0x3D); without an OLED the device still runs caster-only
+- PKC dirty-rect caster mirror (always on): mono OLED pixels expanded to RGB565 white/black over UART0 @ 460800 baud + remote keys from viewer
+- Menu footer combines free heap, targets and boot cause (`34K W:abc B:def PWRON/...`)
 - Low-heap guard: persists the requested scan across a reboot to pristine heap (`RTC_NOINIT_ATTR`) instead of crashing in the radio bring-up
 
 ## Hardware
 
 | Part | Pins |
 |---|---|
-| TFT ILI9341 SPI (SPI2, 20 MHz) | MOSI 23, SCK 18, MISO 19, CS 5, DC 2, RST 4, BL 27 (LEDC PWM) |
+| OLED SSD1306 I2C | SDA 21, SCL 22, 400 kHz, addr 0x3C (0x3D retry) |
 | Buttons to GND, internal pull-ups, active low | UP 32, DOWN 33, LEFT 25, RIGHT 26, OK 14, BACK 13 |
 | USB console / caster | UART0 @ 460800 baud |
 
@@ -95,7 +94,7 @@ Screenshots land in `test_out/`, `test_deauth/` (gitignored — throwaway).
 
 ```text
 main/            firmware: ui_* screens, svc_wifi/svc_ble/svc_target/svc_deauth/svc_resume,
-                hal_display/hal_input, caster, gfx, font
+                hal_oled/hal_input, caster, oled_gfx, font_oled
 tools/           viewer + headless verifiers + pixel/log probes
 firmware/        flashable pack (bootloader + partition-table + app + flash scripts)
 CMakeLists.txt   partitions.csv   sdkconfig.defaults   dependencies.lock
@@ -104,9 +103,9 @@ AGENTS.md        repo conventions, build commands, hard constraints
 
 ## Known quirks
 
-**"low mem XXK reboot".** The 150 KB RGB565 framebuffer stays resident and ESP32 WiFi/Bluedroid `deinit` leaves ~10-15 KB of heap residue per radio switch (fragmentation of the *largest contiguous* block, not total free). Pristine boot shows ~34K largest free; after several WiFi↔BLE round-trips it drops under the 16 K bring-up floor, so the device cleanly reboots into the requested scan instead of asserting. The `XXK` on the `scanning...` screen is that meter.
+**"low mem XXK reboot".** The 1 KB mono framebuffer is static (no heap) but ESP32 WiFi/Bluedroid `deinit` still leaves ~10-15 KB of heap residue per radio switch (fragmentation of the *largest contiguous* block, not total free). After several WiFi↔BLE round-trips the largest block can drop under the 16 K bring-up floor, so the device cleanly reboots into the requested scan instead of asserting. The `XXK` on the `scanning...` screen is that meter.
 
-**Headless units have no logs.** Caster mode silences the log bus (log bytes would corrupt the PKC rect stream), so a headless device looks silent on a 115200 monitor by design. Use the TFT for on-device log output, or add targeted pixel-visible diagnostics.
+**No logs while the caster runs.** The caster mirror is always on and silences the log bus (log bytes would corrupt the PKC rect stream), so the device looks silent on a 115200 monitor by design. Only early boot logs (before the caster starts) are visible. Use the viewer or on-OLED diagnostics.
 
 **Deauth is 2.4 GHz only.** The ESP32 cannot touch 5 GHz, so a client on `SSID-5G` is unaffected even while the flood runs. Target the 2.4 GHz SSID and confirm the client is on that band.
 

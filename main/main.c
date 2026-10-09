@@ -1,6 +1,6 @@
 #include "app_config.h"
 #include "caster.h"
-#include "hal_display.h"
+#include "hal_oled.h"
 #include "hal_input.h"
 #include "ui_calc.h"
 #include "ui_menu.h"
@@ -90,15 +90,13 @@ static int enter_menu_item(int sel, screen_t *screen_out) {
 
 void app_main(void) {
     /* BLE-only device: release Classic-BT controller RAM to the heap FIRST,
-     * before the framebuffer carves DRAM into immovable blocks. One-shot
-     * and irreversible; BLE bring-up later is unaffected. */
+     * before anything else fragments it. One-shot and irreversible; BLE
+     * bring-up later is unaffected. */
     esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
     ESP_LOGI(TAG, "largest free block: %u",
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-    /* Framebuffer FIRST: it needs the largest contiguous DRAM block, before
-     * NVS/tasks/WiFi fragment the heap. */
-    int has_tft = hacku_display_init();
-    if (has_tft < 0) {
+    int has_oled = hal_oled_init();
+    if (has_oled < 0) {
         ESP_LOGE(TAG, "display init failed, halting");
         return;
     }
@@ -109,10 +107,11 @@ void app_main(void) {
         nvs_flash_init();
     }
 
-    if (!has_tft)
-        caster_start(); /* headless: stream UI over USB, keys from viewer */
+    /* Caster mirror is always on: streams the mono UI over USB for the PC
+     * viewer and takes remote keys. Silences the log bus by design. */
+    caster_start();
 
-    hacku_display_set_brightness(100);
+    hal_oled_set_contrast(100);
     hacku_input_init();
 
     int unlocked = 0;
@@ -136,7 +135,7 @@ void app_main(void) {
     } else {
         ui_calc_enter();
     }
-    ESP_LOGI(TAG, "boot: calculator%s", has_tft ? " (TFT)" : " (caster)");
+    ESP_LOGI(TAG, "boot: calculator%s", has_oled ? " (OLED)" : " (caster)");
 
     hacku_key_t k;
     for (;;) {
@@ -168,8 +167,9 @@ void app_main(void) {
                 /* ui_menu_key returns MENU_BACK/-1 or an index; anything
                  * that transitions must pass the deauth/radio guard. */
                 int sel = ui_menu_key(k);
-                if (sel >= 0)
+                if (sel >= 0) {
                     enter_menu_item(sel, &screen);
+                }
                 /* BACK on the top menu does nothing (relock via gesture) */
             } else if (screen == SCR_WIFISCAN) {
                 if (ui_wifiscan_key(k)) {
@@ -193,8 +193,8 @@ void app_main(void) {
                 }
             }
         }
-        hacku_display_caster_poll(); /* skipped-frame catch-up + self-heal */
-        /* Live status for a running attack (paced, cheap, TFT+caster). */
+        hal_oled_caster_poll(); /* skipped-frame catch-up + self-heal */
+        /* Live status for a running attack (paced, cheap, OLED+caster). */
         if (screen == SCR_WIFIATK || screen == SCR_BLEATK) {
             int64_t now_ms = esp_timer_get_time() / 1000;
             if (now_ms - s_last_atk_tick >= 500) {

@@ -24,7 +24,7 @@ static uint8_t crc8(const uint8_t *buf, int len) {
 }
 
 /* uart_write_bytes blocks until the chunk fits the TX ring; the ring drains
- * at wire speed (~125 KB/s @ 1 Mbaud), so a busy UI throttles to the wire. */
+ * at wire speed, so a busy UI throttles to the wire. */
 static void uart_tx(const uint8_t *data, size_t len) {
     while (len > 0) {
         size_t n = len > 1024 ? 1024 : len;

@@ -3,38 +3,23 @@
 deauth, confirm the frame counter climbs, stop it, confirm it stops, and
 relock. Screenshots to test_deauth/. Exit 0 = flow OK.
 
-Colour probes are region *counts* (>=N pixels of a colour inside a band),
-not exact-pixel anchors: RLE frame stitching can leave stale pixels and a
-single-pixel probe is brittle. The bands are derived from the fixed UI
-layout (font 11x22 at scale 1): headings y=8, target line y=44,
-status line y=136, footer y=296.
+Probes are lit-pixel counts in fixed layout bands (128x64 mono UI, 4x9
+font): title y0-10, attacks target y10-19, mode rows y20-47 (selection
+bar), status y47-56, detail footer y55-64.
 """
 import os
 import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
-from hk_test import Dev, POS  # noqa: E402
+from hk_test import Dev, POS, WHITE, BLACK, W, H  # noqa: E402
 
-# RGB565 values exactly as gfx.h's C_RGB computes them
-# (tools/hk_palette.py prints the full palette).
-ORANGE = 0xFC60   # headings / CALC_KEY_FN (C_ORANGE)
-GREEN = 0x0640    # target line / "selected" (C_GREEN)
-RED = 0xF800      # running status (C_RED)
-DIM = 0x94D4      # status bar + BACK hint (CALC_DIM)
-CALC_BG = 0x18C4  # calculator background
 OUT = os.path.join(os.path.dirname(__file__), "..", "test_deauth")
+STATUS_Y = 47   # status line row set by ui_wifiatk.c layout
 
 
-def count(d, color, y0, y1, x0=0, x1=240):
-    n = 0
-    for y in range(max(0, y0), min(y1, 320)):
-        base = y * 240 * 2
-        for x in range(max(0, x0), min(x1, 240)):
-            o = base + x * 2
-            if (d.fb[o] | (d.fb[o + 1] << 8)) == color:
-                n += 1
-    return n
+def count(d, y0, y1, x0=0, x1=W):
+    return d.count_white(y0, y1, x0, x1)
 
 
 def main():
@@ -67,28 +52,27 @@ def main():
     def shot(n):
         d.shot(os.path.join(OUT, n))
 
-    # heading band (title text), target band, status band, footer band
+    # title band (any header text), selection-bar screens, attacks status
     def at_menu():
-        return count(d, ORANGE, 8, 30) >= 10
+        return d.has_bar()
 
     def at_scan():
-        return count(d, ORANGE, 8, 30) >= 10
+        return d.has_bar()
 
     def at_attacks_idle():
-        return (count(d, ORANGE, 8, 30) >= 10 and
-                count(d, GREEN, 44, 66) >= 20 and
-                count(d, DIM, 168, 192) >= 8)
+        return (count(d, 0, 10) >= 8 and
+                count(d, STATUS_Y, STATUS_Y + 9) >= 8)
 
     def at_attacks_running():
-        return (count(d, ORANGE, 8, 30) >= 10 and
-                count(d, RED, 168, 192, 40, 210) >= 10)
+        return (count(d, 0, 10) >= 8 and
+                count(d, STATUS_Y, STATUS_Y + 9) >= 8)
 
     def at_selected_footer():
-        return count(d, GREEN, 296, 318, 140, 236) >= 30
+        return count(d, 55, 64, 0, 64) >= 20
 
     # 1. boot -> calculator
     d.pump(3.0)
-    check("boots to calculator", d.px(239, 319) == CALC_BG)
+    check("boots to calculator", d.px(127, 63) == BLACK)
     shot("1_boot.png")
 
     # 2. unlock 4+6=
@@ -111,7 +95,7 @@ def main():
     shot("4_detail.png")
     d.key("d")            # RIGHT = select for attacks
     d.pump(0.8)
-    check("target selected (green 'selected')", at_selected_footer())
+    check("target selected ('selected')", at_selected_footer())
     shot("5_selected.png")
 
     # 5. back to menu
@@ -130,7 +114,6 @@ def main():
 
     # 7. run every attack mode (UP/DOWN selects, OK runs then stops)
     modes = ["Deauth", "Disassoc", "Deauth+Disassoc"]
-    STATUS_Y = 168   # status line row set by ui_wifiatk.c layout
     for idx, name in enumerate(modes):
         if idx:
             d.key("s")           # DOWN to the next attack
@@ -138,8 +121,8 @@ def main():
         d.key("e")                # run
         d.pump(1.5)
         check(f"{name}: running", at_attacks_running())
-        band = lambda: bytes(d.fb[((STATUS_Y - 6) * 240 * 2):
-                                  ((STATUS_Y + 24) * 240 * 2)])
+        band = lambda: bytes(d.fb[((STATUS_Y - 2) * W * 2):
+                                  ((STATUS_Y + 9) * W * 2)])
         seen = set()
         for _ in range(10):
             d.pump(0.5)
@@ -149,14 +132,14 @@ def main():
         d.key("e")                # stop
         d.pump(1.0)
 
-    stopped = bytes(d.fb)
-    stopped_band = bytes(d.fb[((STATUS_Y - 6) * 240 * 2):
-                              ((STATUS_Y + 24) * 240 * 2)])
+    stopped_band = bytes(d.fb[((STATUS_Y - 2) * W * 2):
+                              ((STATUS_Y + 9) * W * 2)])
     shot("9_stopped.png")
-    check("stopped (idle status)", count(d, DIM, STATUS_Y, STATUS_Y + 24) >= 8)
+    check("stopped (idle status)", count(d, STATUS_Y, STATUS_Y + 9) >= 8)
     d.pump(1.5)
     check("counter frozen after stop",
-          bytes(d.fb[(130 * 240 * 2):(160 * 240 * 2)]) == stopped_band)
+          bytes(d.fb[((STATUS_Y - 2) * W * 2):
+                     ((STATUS_Y + 9) * W * 2)]) == stopped_band)
 
     # 10. BACK -> menu
     d.key("b")
@@ -166,7 +149,7 @@ def main():
     # 11. relock
     d.key("b"); d.key("b"); d.key("b")
     d.pump(0.8)
-    check("relocked to calculator", d.px(239, 319) == CALC_BG)
+    check("relocked to calculator", d.px(127, 63) == BLACK)
     shot("11_relocked.png")
 
     print("RESULT: " + ("ALL PASS" if not fails else "FAILURES: %s" % fails))

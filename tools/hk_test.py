@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """HACKULATOR headless verifier: drives the device over the caster wire
 (UART0 @ 460800 baud, PKC protocol), sends remote keys, saves screenshots,
-and asserts screen state by pixel color.
+and asserts screen state by lit-pixel counts (128x64 mono UI: white text
+bars on black; a full-width inverted selection bar marks menu/list rows).
 
 Checks:
-  1. boot frames arrive + calculator bg present      (caster + calc render)
-  2. typing 2+3*4= stays locked, no orange          (math works, no unlock)
-  3. typing 4+6= shows orange HACKULATOR            (unlock works)
-  4. 3x BACK returns to calculator bg               (relock works)
+  1. boot frames arrive + calculator renders       (caster + calc render)
+  2. typing 2+3*4= stays locked, no selection bar  (math works, no unlock)
+  3. typing 4+6= shows the menu selection bar      (unlock works)
+  4. 3x BACK returns to calculator                 (relock works)
 
 Usage: hk_test.py [--port COM5] [--out test_out]
   Windows example: python tools\\hk_test.py --port COM5
@@ -28,13 +29,11 @@ except ImportError:
 SYNC = b"\x7A\xA5\xE1"
 TAG = b"PKC"
 LOOK = SYNC + TAG
-W, H = 240, 320
+W, H = 128, 64
 
-CALC_BG = 0x18C4   # RGB(24,26,32)
-ORANGE = 0xFC60    # RGB(255,140,0)
-CURSOR = 0xFE40   # RGB(255,200,0) keypad cursor
-DIM = 0x94D4      # RGB(150,155,165) dim text (detail lines, scroll indicator)
-BG_PX = (239, 319)  # margin pixel: always CALC_BG on calculator
+WHITE = 0xFFFF   # lit OLED pixel (text / selection bars)
+BLACK = 0x0000   # unlit OLED pixel (background)
+BG_PX = (127, 63)  # margin pixel: always BLACK on calculator
 
 
 def crc8(blob):
@@ -222,6 +221,26 @@ class Dev:
                 return True
         return False
 
+    def count_white(self, y0, y1, x0=0, x1=W):
+        # lit pixels in a screen band (text / selection-bar detection)
+        n = 0
+        for y in range(max(0, y0), min(y1, H)):
+            base = y * W * 2
+            for x in range(max(0, x0), min(x1, W)):
+                o = base + x * 2
+                if (self.fb[o] | (self.fb[o + 1] << 8)) == WHITE:
+                    n += 1
+        return n
+
+    def has_bar(self, y0=12, y1=48):
+        # full-width inverted selection bar anywhere in the band: a menu,
+        # scan list or attack list is on screen (calculator never has one;
+        # its keypad cursor cell is only 30px wide).
+        for y in range(max(0, y0), min(y1, H) - 8):
+            if self.count_white(y, y + 9) >= 600:
+                return True
+        return False
+
     def has_color_in(self, y0, y1, c, x0=0, x1=W):
         # color in a screen region (unlocked-menu vs keypad disambiguation,
         # scroll-indicator detection, ...)
@@ -295,7 +314,7 @@ def mem_loop(out, port, baud, cycles):
     cur = [0, 0]
     typ("4+6=")
     d.pump(0.5)
-    check("unlocked", d.has_color_in(0, 42, ORANGE))
+    check("unlocked", d.has_bar())
     if fails:
         print("RESULT: FAILURES: %s" % fails)
         return 1
@@ -306,8 +325,8 @@ def mem_loop(out, port, baud, cycles):
         d.pump(2.0)
         d.shot(shot(f"mem_wifi_{i}.png"))
         d.pump(7.0)
-        check(f"wifi {i} results", d.has_color_in(0, 36, ORANGE))
-        if not d.has_color_in(0, 36, ORANGE) and d.px(*BG_PX) == CALC_BG:
+        check(f"wifi {i} results", d.has_bar())
+        if not d.has_bar() and d.px(*BG_PX) == BLACK:
             # Fresh calculator instead of results: silent reboot. Unlock
             # (fresh-boot state: cursor home, empty expr) to capture the
             # menu footer boot-cause tag, then carry on from the menu.
@@ -320,7 +339,7 @@ def mem_loop(out, port, baud, cycles):
         d.key("b")
         d.pump(0.5)
         d.shot(shot(f"menu_w{i}.png"))
-        check(f"wifi {i} menu", d.has_color_in(0, 42, ORANGE))
+        check(f"wifi {i} menu", d.has_bar())
         # BLE scan.
         d.key("s")
         d.pump(0.3)
@@ -328,16 +347,16 @@ def mem_loop(out, port, baud, cycles):
         d.pump(2.0)
         d.shot(shot(f"mem_ble_{i}.png"))
         d.pump(9.0)
-        check(f"ble {i} results", d.has_color_in(0, 36, ORANGE))
+        check(f"ble {i} results", d.has_bar())
         d.key("b")
         d.pump(0.5)
         d.shot(shot(f"menu_b{i}.png"))
-        check(f"ble {i} menu", d.has_color_in(0, 42, ORANGE))
+        check(f"ble {i} menu", d.has_bar())
 
     d.key("b"); d.key("b"); d.key("b")
     d.pump(0.5)
-    check("final relock", d.px(*BG_PX) == CALC_BG and
-          not d.has_color_in(0, 42, ORANGE))
+    check("final relock", d.px(*BG_PX) == BLACK and
+          not d.has_bar())
 
     print("RESULT: %s" % ("ALL PASS" if not fails else f"FAILURES: {fails}"))
     return 1 if fails else 0
@@ -401,16 +420,16 @@ def main():
     d.pump(3.0)
     check("frames received", d.nrect > 0)
     d.shot(shot("calc_boot.png"))
-    check("calculator bg pixel", d.px(*BG_PX) == CALC_BG)
-    check("cursor highlight", d.px(10, 114) == CURSOR)
-    check("locked at boot", not d.has_color_in(60, 105, ORANGE))
+    check("calculator bg pixel", d.px(*BG_PX) == BLACK)
+    check("cursor highlight", d.px(5, 23) == WHITE)
+    check("locked at boot", not d.has_bar())
 
     # 2. math that must NOT unlock: 2+3*4= -> 14
     typ("2+3*4=")
     d.pump(0.5)
     d.shot(shot("calc_math.png"))
-    check("still locked after 2+3*4=", not d.has_color_in(60, 105, ORANGE))
-    check("calc bg after math", d.px(*BG_PX) == CALC_BG)
+    check("still locked after 2+3*4=", not d.has_bar())
+    check("calc bg after math", d.px(*BG_PX) == BLACK)
 
     # 3. unlock: clear, then 4+6=  -> hack menu (orange title at top)
     goto("C")
@@ -418,38 +437,38 @@ def main():
     typ("4+6=")
     d.pump(0.5)
     d.shot(shot("unlocked.png"))
-    check("unlock shows menu", d.has_color_in(0, 42, ORANGE))
+    check("unlock shows menu", d.has_bar())
 
     # 4. relock via 3x BACK
     d.key("b"); d.key("b"); d.key("b")
     d.pump(0.5)
     d.shot(shot("relocked.png"))
-    check("relock back to calc bg", d.px(*BG_PX) == CALC_BG)
-    check("locked after relock", not d.has_color_in(0, 42, ORANGE))
+    check("relock back to calc bg", d.px(*BG_PX) == BLACK)
+    check("locked after relock", not d.has_bar())
 
     # 5. re-unlock: expr "4+6" survived, cursor still on "=", press it
     d.key("e")
     d.pump(0.5)
     d.shot(shot("unlocked2.png"))
-    check("re-unlock on =", d.has_color_in(0, 42, ORANGE))
+    check("re-unlock on =", d.has_bar())
 
     # 6. WiFi scan: select item 1, wait out the blocking scan
     d.key("e")
     d.pump(9.0)
     d.shot(shot("scan.png"))
-    check("scan screen rendered", d.has_color_in(0, 36, ORANGE))
+    check("scan screen rendered", d.has_bar())
     before = bytes(d.fb)
     d.key("e")  # OK -> detail screen for the highlighted entry
     d.pump(0.5)
     d.shot(shot("detail.png"))
-    check("detail rendered", d.has_color_in(0, 36, ORANGE) and
+    check("detail rendered", d.count_white(0, H) > 20 and
           bytes(d.fb) != before)
     d.key("b")  # back to list
     d.pump(0.5)
-    check("back to list", d.has_color_in(0, 36, ORANGE))
+    check("back to list", d.has_bar())
     d.key("b")  # back to menu
     d.pump(0.5)
-    check("back to menu", d.has_color_in(0, 42, ORANGE))
+    check("back to menu", d.has_bar())
 
     # 7. BLE scan: menu item 2 (cursor still on item 1)
     d.key("s")
@@ -457,24 +476,24 @@ def main():
     d.key("e")
     d.pump(11.0)
     d.shot(shot("ble.png"))
-    check("ble screen rendered", d.has_color_in(0, 36, ORANGE))
+    check("ble screen rendered", d.has_bar())
     ble_before = bytes(d.fb)
     d.key("e")  # OK -> detail screen
     d.pump(0.5)
     d.shot(shot("ble_detail.png"))
-    check("ble detail rendered", d.has_color_in(0, 36, ORANGE) and
+    check("ble detail rendered", d.count_white(0, H) > 20 and
           bytes(d.fb) != ble_before)
     d.key("b")  # back to list
     d.pump(0.5)
-    check("ble back to list", d.has_color_in(0, 36, ORANGE))
+    check("ble back to list", d.has_bar())
     d.key("b")  # back to menu
     d.pump(0.5)
-    check("back to menu 2", d.has_color_in(0, 42, ORANGE))
+    check("back to menu 2", d.has_bar())
 
     d.key("b"); d.key("b"); d.key("b")
     d.pump(0.5)
-    check("final relock", d.px(*BG_PX) == CALC_BG and
-          not d.has_color_in(0, 42, ORANGE))
+    check("final relock", d.px(*BG_PX) == BLACK and
+          not d.has_bar())
 
     print("RESULT: %s" % ("ALL PASS" if not fails else f"FAILURES: {fails}"))
     return 1 if fails else 0

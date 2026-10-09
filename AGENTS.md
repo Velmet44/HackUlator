@@ -2,7 +2,8 @@
 
 ESP-IDF (v5.5.5, target `esp32` classic) wardriving-style scanner disguised
 as a calculator. Boots to a working calculator; `4+6=` unlocks WiFi/BLE
-scan + attack menus. ILI9341 240x320 TFT or headless caster mode over UART0.
+scan + attack menus. SSD1306 128x64 OLED (I2C) + always-on caster mirror
+over UART0.
 
 ## Build / flash (Windows)
 
@@ -43,9 +44,11 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   attack targets: WiFi keyed by BSSID, BLE by MAC, `tgt_*_verify()` rescans.
 * `svc_resume.c` — persists a pending scan across `esp_restart()` (RTC
   NOINIT) for the low-heap reboot path.
-* `hal_display.*` (banked 2x75KB FB, TFT+caster flush), `hal_input.*`
+* `hal_oled.*` (1KB static mono page FB, SSD1306+caster flush),
+  `hal_input.*`
   (6 buttons + caster keys, `KEY_RELOCK` on OK+BACK hold / 3x BACK),
-  `caster.*` (PKC rect protocol), `gfx.*`, `font.h` (generated, don't edit).
+  `caster.*` (PKC rect protocol, mono expanded to RGB565 white/black),
+  `oled_gfx.*`, `font_oled.h` (generated via `tools/gen_font.py`, don't edit).
 
 ## Hard constraints
 
@@ -56,18 +59,18 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   `ESP_ERR_INVALID_ARG` on every injected frame** — deauth will report
   `tx err 258` and the counter stays 0. Same technique as Hydra-ESP /
   risinek, credit them if this is ever redistributed.
-* **Heap**: 150KB FB is permanently resident; largest-free-block is the
-  binding metric (pristine ~34K). `heap_ok_or_reboot()` in `ui_*scan.c`
+* **Heap**: 1KB mono FB is static (no heap); largest-free-block is the
+  binding metric. `heap_ok_or_reboot()` in `ui_*scan.c`
   reboots below 16K — never lower it without on-device proof. Free the
   other radio's list before bring-up (`ui_*_drop()`); scan buffers are
-  heap (not static) to protect the FB block. BLE-only: Classic-BT
+  heap (not static). BLE-only: Classic-BT
   controller RAM is released at boot (`main.c`).
 * **`-Werror=all`**: `snprintf` into small buffers needs clamped ints
   first (see footer code in `ui_*scan.c`); one statement per line (the
   misleading-indentation check fires on `if (a) x; if (b) y;`).
-* **UI protocol**: each screen draws then `hacku_display_flush_all()`;
+* **UI protocol**: each screen draws then `hal_oled_flush_all()`;
   `*_run()` drains stale input; `*_key()` returns 1 only to leave.
-  Detail: UP/DOWN moves, RIGHT selects target, OK/LEFT/BACK exits.
+  Detail: UP/DOWN pages fields, RIGHT selects target, OK/LEFT/BACK exits.
 * **Config**: edit `sdkconfig.defaults`, never `sdkconfig` (generated,
   gitignored). Same for `build/` and `managed_components/` (IDF component
   cache). Register new sources in `main/CMakeLists.txt`.
@@ -78,8 +81,8 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   (`wasd`/`e`/`b`). `tools/hk_test.py --port COMx [--cycles N]` —
   headless pass/fail incl. multi-cycle heap screenshots.
   `tools/hk_test_deauth.py` — deauth flow. `tools/hk_log.py` — boot log
-  over UART0 @ 115200 (**pointless on caster units**: logs are silenced so
-  they cannot corrupt the PKC stream). `tools/hk_wire.py`,
+  over UART0 @ 115200 (**early boot only**: once the always-on caster
+  starts, logs are silenced so they cannot corrupt the PKC stream). `tools/hk_wire.py`,
   `tools/hk_px.py`, `tools/hk_anchor.py`, `tools/hk_palette.py` —
   caster-wire and pixel probes. All accept `--port`, auto-detect if
   omitted, and run on Windows/Linux/macOS.

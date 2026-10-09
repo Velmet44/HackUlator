@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """HACKULATOR — serial display viewer (cross-platform: Win/macOS/Linux).
 
-Parses the "PKC" dirty-rect stream a headless HACKULATOR casts over UART0
-(460800 baud). The ESP32 streams redraw regions at native resolution with
-per-row RLE, so the picture is pixel-identical to the real TFT. Any
-non-frame bytes (ESP boot logs) received in between are echoed to the
+Parses the "PKC" dirty-rect stream a HACKULATOR casts over UART0
+(460800 baud). The ESP32 streams redraw regions with per-row RLE; the
+mirror expands the mono OLED pixels to RGB565 white/black, so the picture
+is pixel-identical to the 128x64 OLED. Any non-frame bytes (early boot
+logs, before the caster starts) received in between are echoed to the
 terminal (disable with --no-log).
 
 Protocol (v2, little-endian):
@@ -22,7 +23,7 @@ can drive the 6-button UI remotely:
 Usage:
     Windows: python hacku_viewer.py [--port COM5] [--baud 460800]
     Debian:  python3 hacku_viewer.py [--port /dev/ttyUSB0] [--baud 460800]
-             [--width 240] [--height 320]
+             [--width 128] [--height 64]
     Deps: pip install pyserial pillow (Debian also: sudo apt install python3-tk)
 """
 
@@ -40,7 +41,7 @@ except ImportError:
 SYNC = b"\x7A\xA5\xE1"
 TAG = b"PKC"
 LOOK = SYNC + TAG
-W, H = 240, 320   # HACKULATOR native portrait; overridable via --width/--height
+W, H = 128, 64   # HACKULATOR OLED; overridable via --width/--height
 KEYMAP = {
     "Up": "w", "Left": "a", "Down": "s", "Right": "d",
     "Return": "e", "KP_Enter": "e", "Escape": "b",
@@ -222,7 +223,7 @@ def _rgb565_table():
 
 
 def run_viewer(port=None, baud=460800, echo_log=True, no_reset=False,
-               width=240, height=320):
+               width=128, height=64):
     global W, H
     W, H = width, height
     if port is None:
@@ -381,8 +382,8 @@ if __name__ == "__main__":
     ap.add_argument("--baud", type=int, default=460800)
     ap.add_argument("--no-log", action="store_true", help="disable log echo to terminal")
     ap.add_argument("--no-reset", action="store_true", help="do NOT pulse a hardware reset on connect")
-    ap.add_argument("--width", type=int, default=240, help="display width")
-    ap.add_argument("--height", type=int, default=320, help="display height")
+    ap.add_argument("--width", type=int, default=128, help="display width")
+    ap.add_argument("--height", type=int, default=64, help="display height")
     ap.add_argument("--list-ports", action="store_true", help="list serial ports and exit")
     a = ap.parse_args()
     if a.list_ports:

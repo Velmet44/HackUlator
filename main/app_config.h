@@ -1,25 +1,19 @@
 #pragma once
 
-/* Hackulator — board + protocol configuration (Phase 0).
- * Classic ESP32-WROOM, 2.8" ILI9341 240x320 portrait, 6 buttons. */
+/* Hackulator — board + protocol configuration.
+ * Classic ESP32-WROOM, 0.96" 128x64 SSD1306 OLED (I2C), 6 buttons. */
 
 #include <stdint.h>
 
-/* ---- Display ---- */
-#define HACKU_DISP_W        240
-#define HACKU_DISP_H        320
+/* ---- Display (SSD1306 128x64, I2C) ---- */
+#define HACKU_DISP_W        128
+#define HACKU_DISP_H        64
 
-#define PIN_TFT_MOSI        23
-#define PIN_TFT_SCK         18
-#define PIN_TFT_MISO        19
-#define PIN_TFT_CS          5
-#define PIN_TFT_DC          2
-#define PIN_TFT_RST         4
-#define PIN_TFT_BL          27
-#define TFT_SPI_HOST        SPI2_HOST
-#define TFT_SPI_HZ          (20 * 1000 * 1000) /* 40M radiates into UART on
-                                                  Dupont wiring: bit errors
-                                                  both directions at 1Mbaud */
+#define PIN_OLED_SDA        21
+#define PIN_OLED_SCL        22
+#define OLED_I2C_PORT       0
+#define OLED_I2C_HZ         400000
+#define OLED_ADDR           0x3C
 
 /* ---- Buttons (to GND, internal pull-ups, active low) ---- */
 #define PIN_BTN_UP          32
@@ -31,8 +25,8 @@
 
 /* ---- Caster: PKC wire protocol (compatible with pikachu viewer) ----
  * UART0 @ 460800 baud, shared with the USB console cable.
- * (1 Mbaud proved error-prone next to 40 MHz TFT SPI on breadboard
- * wiring: single lost key bytes + torn frames. 460800 = 2x bit time.)
+ * The OLED framebuffer is mono; the caster mirror expands it to RGB565
+ * (white/black) so the wire format is unchanged (viewer: 128x64).
  * Frame: 7A A5 E1 'P' 'K' 'C' + x,y,w,h (u16 LE) + crc8(header[6:14]).
  * Rows: enc_len u16; enc_len == w*2 -> raw RGB565, else RLE [count:u16][px:u16].
  * Host->device keys: w/a/s/d = arrows, e/Enter = OK, b/Esc = BACK. */

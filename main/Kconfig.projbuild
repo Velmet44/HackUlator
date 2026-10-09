@@ -1,13 +1,12 @@
 menu "Hackulator"
 
-    config HACKU_FORCE_CASTER
-        bool "Force caster mode (skip TFT, for headless testing)"
+    config HACKU_OLED_SH1106
+        bool "SH1106 panel (column-offset quirk)"
         default n
         help
-            When enabled, the TFT is never probed and the device boots
-            straight into caster mode: framebuffer is streamed over
-            UART0 @ 1 Mbaud (PKC protocol) and keys come from the host
-            viewer. Useful when a screen is attached but you want to
-            test through the viewer anyway.
+            Enable when the 0.96" module uses an SH1106 controller
+            instead of SSD1306. SH1106 GDDRAM is 132 columns wide,
+            so the 128-wide image is shifted by 2 columns.
+            Default (n) targets SSD1306, the common 4-pin module.
 
 endmenu

@@ -1,9 +1,9 @@
 #include "ui_wifiscan.h"
 #include "app_config.h"
-#include "hal_display.h"
+#include "hal_oled.h"
 #include "hal_input.h"
-#include "gfx.h"
-#include "font.h"
+#include "oled_gfx.h"
+#include "font_oled.h"
 #include "svc_wifi.h"
 #include "esp_wifi_types.h"
 #include "esp_heap_caps.h"
@@ -22,231 +22,287 @@ static int s_count = -2; /* -2 never scanned, -1 error, >=0 count */
 static int s_top = 0;    /* first visible row */
 static int s_sel = 0;    /* highlighted entry */
 static int s_detail = 0; /* 1 = detail screen */
+static int s_page = 0;   /* detail field page */
 
-#define ROWS 5
-#define ROW_PX 48
-#define LIST_Y0 52
+#define ROWS 4
+#define ROW_PX 11
+#define LIST_Y0 12
+#define FIELDS_PER_PAGE 4
+#define WIFI_NFIELDS 10
 
 static const char *auth_label(int a) {
     switch (a) {
-        case WIFI_AUTH_OPEN:            return "OPEN";
-        case WIFI_AUTH_WEP:             return "WEP";
-        case WIFI_AUTH_WPA_PSK:         return "WPA";
-        case WIFI_AUTH_WPA2_PSK:        return "WPA2";
-        case WIFI_AUTH_WPA_WPA2_PSK:    return "WPA*";
-        case WIFI_AUTH_ENTERPRISE:      return "WPA2-E";
-        case WIFI_AUTH_WPA3_PSK:        return "WPA3";
-        case WIFI_AUTH_WPA2_WPA3_PSK:   return "WPA2/3";
-        case WIFI_AUTH_WAPI_PSK:        return "WAPI";
-        case WIFI_AUTH_OWE:             return "OWE";
-        case WIFI_AUTH_WPA3_ENT_192:    return "WPA3-E";
+        case WIFI_AUTH_OPEN:
+            return "OPEN";
+        case WIFI_AUTH_WEP:
+            return "WEP";
+        case WIFI_AUTH_WPA_PSK:
+            return "WPA";
+        case WIFI_AUTH_WPA2_PSK:
+            return "WPA2";
+        case WIFI_AUTH_WPA_WPA2_PSK:
+            return "WPA*";
+        case WIFI_AUTH_ENTERPRISE:
+            return "WPA2-E";
+        case WIFI_AUTH_WPA3_PSK:
+            return "WPA3";
+        case WIFI_AUTH_WPA2_WPA3_PSK:
+            return "WPA2/3";
+        case WIFI_AUTH_WAPI_PSK:
+            return "WAPI";
+        case WIFI_AUTH_OWE:
+            return "OWE";
+        case WIFI_AUTH_WPA3_ENT_192:
+            return "WPA3-E";
         case WIFI_AUTH_WPA3_EXT_PSK:
+            return "WPA3";
         case WIFI_AUTH_WPA3_EXT_PSK_MIXED_MODE:
-                                        return "WPA3";
-        case WIFI_AUTH_DPP:             return "DPP";
-        case WIFI_AUTH_WPA3_ENTERPRISE: return "WPA3-E";
-        default:                        return "???";
+            return "WPA3";
+        case WIFI_AUTH_DPP:
+            return "DPP";
+        case WIFI_AUTH_WPA3_ENTERPRISE:
+            return "WPA3-E";
+        default:
+            return "???";
     }
 }
 
 static const char *cipher_label(int c) {
     switch (c) {
-        case WIFI_CIPHER_TYPE_NONE:      return "NONE";
+        case WIFI_CIPHER_TYPE_NONE:
+            return "NONE";
         case WIFI_CIPHER_TYPE_WEP40:
-        case WIFI_CIPHER_TYPE_WEP104:    return "WEP";
-        case WIFI_CIPHER_TYPE_TKIP:      return "TKIP";
-        case WIFI_CIPHER_TYPE_CCMP:      return "CCMP";
-        case WIFI_CIPHER_TYPE_TKIP_CCMP: return "T+C";
-        case WIFI_CIPHER_TYPE_SMS4:      return "SMS4";
+            return "WEP";
+        case WIFI_CIPHER_TYPE_WEP104:
+            return "WEP";
+        case WIFI_CIPHER_TYPE_TKIP:
+            return "TKIP";
+        case WIFI_CIPHER_TYPE_CCMP:
+            return "CCMP";
+        case WIFI_CIPHER_TYPE_TKIP_CCMP:
+            return "T+C";
+        case WIFI_CIPHER_TYPE_SMS4:
+            return "SMS4";
         case WIFI_CIPHER_TYPE_GCMP:
-        case WIFI_CIPHER_TYPE_GCMP256:   return "GCMP";
-        default:                         return "?";
+            return "GCMP";
+        case WIFI_CIPHER_TYPE_GCMP256:
+            return "GCMP";
+        default:
+            return "?";
     }
 }
 
 static void draw_msg(const char *l1, const char *l2) {
-    hacku_fb_t *fb = hacku_display_fb();
-    gfx_fill_rect(fb, 0, 0, HACKU_DISP_W, HACKU_DISP_H, C_BLACK);
-    int w1 = gfx_text_w(&hacku_font, l1, 1);
-    gfx_text(fb, &hacku_font, (HACKU_DISP_W - w1) / 2, 130,
-             l1, C_WHITE, -1, 1);
+    oled_fb_t *fb = hal_oled_fb();
+    oled_clear(fb, 0);
+    int w1 = oled_text_w(&oled_font, l1);
+    oled_text(fb, &oled_font, (OLED_W - w1) / 2, 24, l1, 1);
     if (l2) {
-        int w2 = gfx_text_w(&hacku_font, l2, 1);
-        gfx_text(fb, &hacku_font, (HACKU_DISP_W - w2) / 2, 160,
-                 l2, CALC_DIM, -1, 1);
+        int w2 = oled_text_w(&oled_font, l2);
+        oled_text(fb, &oled_font, (OLED_W - w2) / 2, 36, l2, 1);
     }
-    hacku_display_flush_all();
+    hal_oled_flush_all();
+}
+
+/* One list row: "ssid ch rssi", truncated to 32 cells. */
+static void draw_row(oled_fb_t *fb, int y, wifi_ap_t *ap, int sel) {
+    char row[36];
+    char nm[20];
+    snprintf(nm, sizeof(nm), "%.18s", ap->ssid[0] ? ap->ssid : "<hid>");
+    int ch = ap->channel;
+    if (ch < 0) {
+        ch = 0;
+    }
+    if (ch > 99) {
+        ch = 99;
+    }
+    int rs = ap->rssi;
+    if (rs < -999) {
+        rs = -999;
+    }
+    if (rs > 999) {
+        rs = 999;
+    }
+    snprintf(row, sizeof(row), "%-18.18s %2d %4d", nm, ch, rs);
+    row[32] = 0;
+    if (sel) {
+        oled_fill_rect(fb, 0, y, OLED_W, ROW_PX, 1);
+    }
+    oled_text(fb, &oled_font, 0, y + 1, row, sel ? 0 : 1);
 }
 
 static void draw_list(void) {
-    hacku_fb_t *fb = hacku_display_fb();
-    gfx_fill_rect(fb, 0, 0, HACKU_DISP_W, HACKU_DISP_H, C_BLACK);
+    oled_fb_t *fb = hal_oled_fb();
+    oled_clear(fb, 0);
     char head[32];
-    snprintf(head, sizeof(head), s_count < 0 ? "scan failed" : "%d networks",
+    snprintf(head, sizeof(head), s_count < 0 ? "scan failed" : "%d nets",
              s_count < 0 ? 0 : s_count);
-    int hw = gfx_text_w(&hacku_font, head, 1);
-    gfx_text(fb, &hacku_font, (HACKU_DISP_W - hw) / 2, 8,
-             head, C_ORANGE, -1, 1);
-    gfx_hline(fb, 0, 36, HACKU_DISP_W, C_GRAY25);
+    int hw = oled_text_w(&oled_font, head);
+    oled_text(fb, &oled_font, (OLED_W - hw) / 2, 0, head, 1);
+    oled_hline(fb, 0, 10, OLED_W, 1);
     if (s_count > 0) {
         for (int i = 0; i < ROWS && s_top + i < s_count; i++) {
             int idx = s_top + i;
-            wifi_ap_t *ap = &s_aps[idx];
-            int y = LIST_Y0 + i * ROW_PX;
-            if (idx == s_sel)
-                gfx_fill_rect(fb, 2, y - 2, HACKU_DISP_W - 4, ROW_PX - 2,
-                              C_GRAY25);
-            int ch = ap->channel;
-            if (ch < 0) ch = 0;
-            if (ch > 99) ch = 99;
-            int rs = ap->rssi;
-            if (rs < -999) rs = -999;
-            if (rs > 999) rs = 999;
-            char chb[12], rsb[12], det[40]; /* worst-case int-proof */
-            snprintf(chb, sizeof(chb), "%2d", ch);
-            snprintf(rsb, sizeof(rsb), "%4d", rs);
-            snprintf(det, sizeof(det), "ch %.2s %.4sdBm %.6s", chb, rsb,
-                     auth_label(ap->auth));
-            char name[20];
-            snprintf(name, sizeof(name), "%.18s",
-                     ap->ssid[0] ? ap->ssid : "<hidden>");
-            gfx_text(fb, &hacku_font, 6, LIST_Y0 + i * ROW_PX,
-                     name, C_WHITE, -1, 1);
-            gfx_text(fb, &hacku_font, 6, LIST_Y0 + i * ROW_PX + 22,
-                     det, CALC_DIM, -1, 1);
+            draw_row(fb, LIST_Y0 + i * ROW_PX, &s_aps[idx], idx == s_sel);
         }
-        /* Footer: position + free heap left, targets (or OK hint when
-         * none set yet) right. */
         {
             char left[16], right[16];
             int a = s_top + 1, b = s_count; /* clamp: int-proof buffer */
-            if (a < 0)
+            if (a < 0) {
                 a = 0;
-            if (a > 99)
+            }
+            if (a > 99) {
                 a = 99;
-            if (b < 0)
+            }
+            if (b < 0) {
                 b = 0;
-            if (b > 99)
+            }
+            if (b > 99) {
                 b = 99;
-            if (s_count > ROWS)
+            }
+            if (s_count > ROWS) {
                 snprintf(left, sizeof(left), "%d/%d %uK", a, b,
                          ui_status_memk());
-            else
+            } else {
                 snprintf(left, sizeof(left), "%uK", ui_status_memk());
-            gfx_text(fb, &hacku_font, 6, HACKU_DISP_H - 24,
-                     left, CALC_DIM, -1, 1);
-            if (tgt_wifi_has() || tgt_ble_has())
+            }
+            oled_text(fb, &oled_font, 0, OLED_H - 9, left, 1);
+            if (tgt_wifi_has() || tgt_ble_has()) {
                 ui_status_targets(right, sizeof(right));
-            else
+            } else {
                 snprintf(right, sizeof(right), "OK");
-            gfx_text(fb, &hacku_font,
-                     HACKU_DISP_W - 6 - gfx_text_w(&hacku_font, right, 1),
-                     HACKU_DISP_H - 24, right, CALC_DIM, -1, 1);
+            }
+            int rw = oled_text_w(&oled_font, right);
+            oled_text(fb, &oled_font, OLED_W - rw, OLED_H - 9, right, 1);
         }
     }
-    hacku_display_flush_all();
+    hal_oled_flush_all();
 }
 
-/* Detail line: "label value" two-tone on one line when it fits in 21
- * cells, else dim label line + wrapped white value lines. Advances *y. */
-static void det_field(hacku_fb_t *fb, int *y,
-                      const char *label, const char *val) {
-    int lw = gfx_text_w(&hacku_font, label, 1);
-    int sp = gfx_text_w(&hacku_font, " ", 1);
-    int vw = gfx_text_w(&hacku_font, val, 1);
-    if (lw + sp + vw <= 21 * hacku_font.w) {
-        gfx_text(fb, &hacku_font, 6, *y, label, CALC_DIM, -1, 1);
-        gfx_text(fb, &hacku_font, 6 + lw + sp, *y, val, C_WHITE, -1, 1);
-        *y += 23;
-        return;
+/* i-th detail field of one AP, as "LBL val" truncated to 32 cells. */
+static void wifi_field(wifi_ap_t *ap, int i, char *out, size_t n) {
+    char bssid[18], rsb[16], ch[8], ci[14], phy[14], ftm[6], cc[4];
+    switch (i) {
+        case 0:
+            snprintf(out, n, "SSID %.30s", ap->ssid[0] ? ap->ssid : "<hid>");
+            break;
+        case 1:
+            snprintf(bssid, sizeof(bssid), "%02X:%02X:%02X:%02X:%02X:%02X",
+                     ap->bssid[0], ap->bssid[1], ap->bssid[2],
+                     ap->bssid[3], ap->bssid[4], ap->bssid[5]);
+            snprintf(out, n, "MAC %s", bssid);
+            break;
+        case 2: {
+            int rs = ap->rssi < -999 ? -999 : ap->rssi > 999 ? 999 : ap->rssi;
+            snprintf(rsb, sizeof(rsb), "%d dBm", rs);
+            snprintf(out, n, "RSSI %s", rsb);
+            break;
+        }
+        case 3: {
+            int c = ap->channel < 0 ? 0 : ap->channel > 99 ? 99 : ap->channel;
+            snprintf(ch, sizeof(ch), ap->second == 1 ? "%d+" :
+                                     ap->second == 2 ? "%d-" : "%d", c);
+            snprintf(out, n, "CHAN %s", ch);
+            break;
+        }
+        case 4:
+            snprintf(out, n, "AUTH %s", auth_label(ap->auth));
+            break;
+        case 5:
+            snprintf(ci, sizeof(ci), "P:%.4s G:%.4s",
+                     cipher_label(ap->pairwise), cipher_label(ap->group));
+            snprintf(out, n, "CIPH %s", ci);
+            break;
+        case 6:
+            snprintf(phy, sizeof(phy), "%s%s%s%s%s",
+                     ap->phy_b ? "b" : "", ap->phy_g ? "/g" : "",
+                     ap->phy_n ? "/n" : "", ap->phy_lr ? "/lr" : "",
+                     ap->phy_ax ? "/ax" : "");
+            if (!phy[0]) {
+                snprintf(phy, sizeof(phy), "-");
+            } else if (phy[0] == '/') {
+                memmove(phy, phy + 1, strlen(phy));
+            }
+            snprintf(out, n, "PHY %s", phy[0] == '/' ? phy + 1 : phy);
+            break;
+        case 7:
+            snprintf(out, n, "WPS %s", ap->wps ? "yes" : "no");
+            break;
+        case 8:
+            snprintf(ftm, sizeof(ftm), "%s%s%s",
+                     ap->ftm_r ? "R" : "", ap->ftm_i ? "I" : "",
+                     !ap->ftm_r && !ap->ftm_i ? "-" : "");
+            snprintf(out, n, "FTM %s", ftm);
+            break;
+        default:
+            snprintf(cc, sizeof(cc), "%.2s", ap->country);
+            if (cc[0] < ' ' || cc[1] < ' ') {
+                snprintf(cc, sizeof(cc), "-");
+            }
+            snprintf(out, n, "CC %s", cc);
+            break;
     }
-    gfx_text(fb, &hacku_font, 6, *y, label, CALC_DIM, -1, 1);
-    *y += 23;
-    size_t n = strlen(val), off = 0;
-    do {
-        char seg[24];
-        size_t k = n - off > 21 ? 21 : n - off;
-        memcpy(seg, val + off, k);
-        seg[k] = 0;
-        gfx_text(fb, &hacku_font, 6, *y, seg, C_WHITE, -1, 1);
-        *y += 23;
-        off += k;
-    } while (off < n);
+    out[n - 1] = 0;
 }
 
 static void draw_detail(void) {
-    hacku_fb_t *fb = hacku_display_fb();
-    gfx_fill_rect(fb, 0, 0, HACKU_DISP_W, HACKU_DISP_H, C_BLACK);
+    oled_fb_t *fb = hal_oled_fb();
+    oled_clear(fb, 0);
     const char *head = "WiFi detail";
-    int hw = gfx_text_w(&hacku_font, head, 1);
-    gfx_text(fb, &hacku_font, (HACKU_DISP_W - hw) / 2, 8,
-             head, C_ORANGE, -1, 1);
-    gfx_hline(fb, 0, 36, HACKU_DISP_W, C_GRAY25);
+    int hw = oled_text_w(&oled_font, head);
+    oled_text(fb, &oled_font, (OLED_W - hw) / 2, 0, head, 1);
+    oled_hline(fb, 0, 10, OLED_W, 1);
     wifi_ap_t *ap = &s_aps[s_sel];
-    int y = 44;
-    char bssid[18], rsb[16], ch[8], ci[16], phy[16], ftm[8], cc[4];
-    snprintf(bssid, sizeof(bssid), "%02X:%02X:%02X:%02X:%02X:%02X",
-             ap->bssid[0], ap->bssid[1], ap->bssid[2],
-             ap->bssid[3], ap->bssid[4], ap->bssid[5]);
-    int rs = ap->rssi < -999 ? -999 : ap->rssi > 999 ? 999 : ap->rssi;
-    snprintf(rsb, sizeof(rsb), "%d dBm", rs);
-    int c = ap->channel < 0 ? 0 : ap->channel > 99 ? 99 : ap->channel;
-    snprintf(ch, sizeof(ch), ap->second == 1 ? "%d+" :
-                             ap->second == 2 ? "%d-" : "%d", c);
-    snprintf(ci, sizeof(ci), "P:%.4s G:%.4s",
-             cipher_label(ap->pairwise), cipher_label(ap->group));
-    snprintf(phy, sizeof(phy), "%s%s%s%s%s",
-             ap->phy_b ? "b" : "", ap->phy_g ? "/g" : "",
-             ap->phy_n ? "/n" : "", ap->phy_lr ? "/lr" : "",
-             ap->phy_ax ? "/ax" : "");
-    if (!phy[0])
-        snprintf(phy, sizeof(phy), "-");
-    else if (phy[0] == '/')
-        memmove(phy, phy + 1, strlen(phy));
-    snprintf(ftm, sizeof(ftm), "%s%s%s",
-             ap->ftm_r ? "R" : "", ap->ftm_i ? "I" : "",
-             !ap->ftm_r && !ap->ftm_i ? "-" : "");
-    snprintf(cc, sizeof(cc), "%.2s", ap->country);
-    if (cc[0] < ' ' || cc[1] < ' ')
-        snprintf(cc, sizeof(cc), "-");
-    det_field(fb, &y, "SSID", ap->ssid[0] ? ap->ssid : "<hidden>");
-    det_field(fb, &y, "MAC", bssid);
-    det_field(fb, &y, "RSSI", rsb);
-    det_field(fb, &y, "CHAN", ch);
-    det_field(fb, &y, "AUTH", auth_label(ap->auth));
-    det_field(fb, &y, "CIPH", ci);
-    det_field(fb, &y, "PHY", phy[0] == '/' ? phy + 1 : phy);
-    det_field(fb, &y, "WPS", ap->wps ? "yes" : "no");
-    det_field(fb, &y, "FTM", ftm);
-    det_field(fb, &y, "CC", cc);
-    gfx_text(fb, &hacku_font, 6, HACKU_DISP_H - 24,
-             "BACK", CALC_DIM, -1, 1);
+    for (int i = 0; i < FIELDS_PER_PAGE; i++) {
+        int fi = s_page * FIELDS_PER_PAGE + i;
+        if (fi >= WIFI_NFIELDS) {
+            break;
+        }
+        char line[36];
+        wifi_field(ap, fi, line, sizeof(line));
+        line[32] = 0;
+        oled_text(fb, &oled_font, 0, LIST_Y0 + i * ROW_PX + 1, line, 1);
+    }
     {
         int is_sel = tgt_wifi_has() &&
             !memcmp(ap->bssid, tgt_wifi_bssid(), 6);
-        const char *rs = is_sel ? "selected" : "RIGHT=select";
-        gfx_text(fb, &hacku_font,
-                 HACKU_DISP_W - 6 - gfx_text_w(&hacku_font, rs, 1),
-                 HACKU_DISP_H - 24, rs,
-                 is_sel ? C_GREEN : CALC_DIM, -1, 1);
+        char pg[12];
+        int npg = (WIFI_NFIELDS + FIELDS_PER_PAGE - 1) / FIELDS_PER_PAGE;
+        int pg0 = s_page + 1;
+        if (pg0 < 0) {
+            pg0 = 0;
+        }
+        if (pg0 > 99) {
+            pg0 = 99;
+        }
+        if (npg < 0) {
+            npg = 0;
+        }
+        if (npg > 99) {
+            npg = 99;
+        }
+        snprintf(pg, sizeof(pg), "%d/%d", pg0, npg);
+        oled_text(fb, &oled_font, 0, OLED_H - 9,
+                  is_sel ? "selected" : "R=sel", 1);
+        int pw = oled_text_w(&oled_font, pg);
+        oled_text(fb, &oled_font, OLED_W - pw, OLED_H - 9, pg, 1);
     }
-    hacku_display_flush_all();
+    hal_oled_flush_all();
 }
 
-/* Heap floor for a radio bring-up (pristine boot shows ~34K; radio cycles
- * leak ~10-15K each, so the floor is reached after a few switches). Below
- * this, IDF's own bring-up unwinds hit NULL allocs and assert - so persist
- * the requested scan and reboot to pristine heap instead of crashing.
- * Two strikes in a row (no successful scan between) parks on a safe
- * screen: something is structurally wrong, don't reboot-loop. */
+/* Heap floor for a radio bring-up. The 1 KB OLED framebuffer leaves far
+ * more headroom than the old 150 KB TFT one, but radio cycles still leak
+ * ~10-15K each: keep the reboot-to-pristine-heap guard. Two strikes in a
+ * row parks on a safe screen instead of reboot-looping. */
 #define BRINGUP_MIN_KB 16
 
 /* 1 when heap can take a bring-up, else resume-or-park (returns 0). */
 static int heap_ok_or_reboot(void) {
     unsigned kb = (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)
                              / 1024);
-    if (kb >= BRINGUP_MIN_KB)
+    if (kb >= BRINGUP_MIN_KB) {
         return 1;
+    }
     if (resume_note_lowmem() >= 2) {
         draw_msg("mem too low", "reset device");
         for (;;)
@@ -262,8 +318,9 @@ static int heap_ok_or_reboot(void) {
 
 int ui_wifiscan_run(void) {
     ui_blescan_drop(); /* the other radio's list is dead weight now */
-    if (!heap_ok_or_reboot())
+    if (!heap_ok_or_reboot()) {
         return -1;
+    }
     char sl2[24];
     snprintf(sl2, sizeof(sl2), "2.4G %uK",
              (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)
@@ -281,13 +338,15 @@ int ui_wifiscan_run(void) {
     s_top = 0;
     s_sel = 0;
     s_detail = 0;
+    s_page = 0;
     hacku_input_drain(); /* drop keys pressed mid-scan */
     if (s_count < 0) {
         char det[24];
         unsigned kb = (unsigned)(heap_caps_get_largest_free_block(
                                      MALLOC_CAP_8BIT) / 1024);
-        if (kb > 9999)
+        if (kb > 9999) {
             kb = 9999;
+        }
         snprintf(det, sizeof(det), "err %d %uK", s_count, kb);
         draw_msg("scan failed", det);
         return -1;
@@ -306,24 +365,22 @@ void ui_wifiscan_drop(void) {
     s_top = 0;
     s_sel = 0;
     s_detail = 0;
+    s_page = 0;
 }
 
 int ui_wifiscan_key(hacku_key_t k) {
+    int npg = (WIFI_NFIELDS + FIELDS_PER_PAGE - 1) / FIELDS_PER_PAGE;
     if (s_detail) {
         switch (k) {
             case KEY_UP:
-                if (s_sel > 0) {
-                    s_sel--;
-                    if (s_sel < s_top)
-                        s_top = s_sel;
+                if (s_page > 0) {
+                    s_page--;
                     draw_detail();
                 }
                 return 0;
             case KEY_DOWN:
-                if (s_sel + 1 < s_count) {
-                    s_sel++;
-                    if (s_sel >= s_top + ROWS)
-                        s_top = s_sel - ROWS + 1;
+                if (s_page + 1 < npg) {
+                    s_page++;
                     draw_detail();
                 }
                 return 0;
@@ -331,6 +388,7 @@ int ui_wifiscan_key(hacku_key_t k) {
             case KEY_LEFT:
             case KEY_BACK:
                 s_detail = 0;
+                s_page = 0;
                 draw_list();
                 return 0;
             case KEY_RIGHT:
@@ -346,22 +404,25 @@ int ui_wifiscan_key(hacku_key_t k) {
         case KEY_UP:
             if (s_sel > 0) {
                 s_sel--;
-                if (s_sel < s_top)
+                if (s_sel < s_top) {
                     s_top = s_sel;
+                }
                 draw_list();
             }
             return 0;
         case KEY_DOWN:
             if (s_sel + 1 < s_count) {
                 s_sel++;
-                if (s_sel >= s_top + ROWS)
+                if (s_sel >= s_top + ROWS) {
                     s_top = s_sel - ROWS + 1;
+                }
                 draw_list();
             }
             return 0;
         case KEY_OK:
             if (s_count > 0) {
                 s_detail = 1;
+                s_page = 0;
                 draw_detail();
             }
             return 0;

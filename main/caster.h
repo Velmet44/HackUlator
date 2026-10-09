@@ -1,8 +1,9 @@
 #pragma once
 
-/* PKC dirty-rect caster: streams framebuffer regions over UART0 @ 1 Mbaud
- * (wire-compatible with the pikachu serial viewer) and receives remote
- * key bytes from the host. */
+/* PKC dirty-rect caster: streams framebuffer regions over UART0 @ 460800
+ * baud (wire-compatible with the pikachu serial viewer) and receives
+ * remote key bytes from the host. The OLED mirror expands mono pixels to
+ * RGB565 white/black so the wire format is unchanged. */
 
 #include <stdint.h>
 #include "freertos/FreeRTOS.h"

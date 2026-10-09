@@ -1,8 +1,8 @@
 idf_component_register(SRCS "main.c"
                             "caster.c"
-                            "hal_display.c"
+                            "hal_oled.c"
                             "hal_input.c"
-                            "gfx.c"
+                            "oled_gfx.c"
                             "ui_calc.c"
                             "ui_menu.c"
                             "ui_wifiscan.c"
@@ -18,7 +18,7 @@ idf_component_register(SRCS "main.c"
                             "wsl_bypasser.c"
                        INCLUDE_DIRS "."
                        PRIV_REQUIRES esp_wifi esp_event esp_netif nvs_flash
-                                     driver esp_timer bt)
+                                     driver esp_timer bt esp_lcd)
 
 # WSL bypass: let our ieee80211_raw_frame_sanity_check override the copy in
 # the closed Wi-Fi binary. Without -zmuldefs the duplicate symbol is dropped

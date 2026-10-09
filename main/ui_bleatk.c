@@ -1,9 +1,9 @@
 #include "ui_bleatk.h"
 #include "app_config.h"
-#include "hal_display.h"
+#include "hal_oled.h"
 #include "hal_input.h"
-#include "gfx.h"
-#include "font.h"
+#include "oled_gfx.h"
+#include "font_oled.h"
 #include "svc_wifi.h"
 #include "svc_ble.h"
 #include "svc_target.h"
@@ -13,49 +13,43 @@
 #include <stdio.h>
 
 static void draw_msg(const char *l1, const char *l2) {
-    hacku_fb_t *fb = hacku_display_fb();
-    gfx_fill_rect(fb, 0, 0, HACKU_DISP_W, HACKU_DISP_H, C_BLACK);
-    gfx_text(fb, &hacku_font, (HACKU_DISP_W - gfx_text_w(&hacku_font, l1, 1)) / 2,
-             130, l1, C_WHITE, -1, 1);
+    oled_fb_t *fb = hal_oled_fb();
+    oled_clear(fb, 0);
+    int w1 = oled_text_w(&oled_font, l1);
+    oled_text(fb, &oled_font, (OLED_W - w1) / 2, 24, l1, 1);
     if (l2) {
-        gfx_text(fb, &hacku_font,
-                 (HACKU_DISP_W - gfx_text_w(&hacku_font, l2, 1)) / 2, 160,
-                 l2, CALC_DIM, -1, 1);
+        int w2 = oled_text_w(&oled_font, l2);
+        oled_text(fb, &oled_font, (OLED_W - w2) / 2, 36, l2, 1);
     }
-    hacku_display_flush_all();
+    hal_oled_flush_all();
 }
 
 static void draw(void) {
-    hacku_fb_t *fb = hacku_display_fb();
-    gfx_fill_rect(fb, 0, 0, HACKU_DISP_W, HACKU_DISP_H, C_BLACK);
+    oled_fb_t *fb = hal_oled_fb();
+    oled_clear(fb, 0);
     const char *head = "BLE attacks";
-    gfx_text(fb, &hacku_font,
-             (HACKU_DISP_W - gfx_text_w(&hacku_font, head, 1)) / 2, 8,
-             head, C_ORANGE, -1, 1);
-    gfx_hline(fb, 0, 36, HACKU_DISP_W, C_GRAY25);
+    int hw = oled_text_w(&oled_font, head);
+    oled_text(fb, &oled_font, (OLED_W - hw) / 2, 0, head, 1);
     {
-        char t[24];
-        snprintf(t, sizeof(t), "target %.15s", tgt_ble_mac());
-        int tw = gfx_text_w(&hacku_font, t, 1);
-        gfx_text(fb, &hacku_font, (HACKU_DISP_W - tw) / 2, 52,
-                 t, C_GREEN, -1, 1);
+        char t[33];
+        snprintf(t, sizeof(t), ">%.27s", tgt_ble_mac());
+        t[32] = 0;
+        int tw = oled_text_w(&oled_font, t);
+        oled_text(fb, &oled_font, (OLED_W - tw) / 2, 10, t, 1);
     }
     const char *l1 = "empty";
-    gfx_text(fb, &hacku_font,
-             (HACKU_DISP_W - gfx_text_w(&hacku_font, l1, 1)) / 2, 140,
-             l1, CALC_DIM, -1, 1);
+    int w1 = oled_text_w(&oled_font, l1);
+    oled_text(fb, &oled_font, (OLED_W - w1) / 2, 28, l1, 1);
     {
-        char st[24];
+        char st[20];
         ui_status_line(st, sizeof(st));
-        gfx_text(fb, &hacku_font,
-                 (HACKU_DISP_W - gfx_text_w(&hacku_font, st, 1)) / 2,
-                 HACKU_DISP_H - 52, st, CALC_DIM, -1, 1);
+        int sw = oled_text_w(&oled_font, st);
+        oled_text(fb, &oled_font, (OLED_W - sw) / 2, OLED_H - 18, st, 1);
     }
     const char *l2 = "BACK to return";
-    gfx_text(fb, &hacku_font,
-             (HACKU_DISP_W - gfx_text_w(&hacku_font, l2, 1)) / 2,
-             HACKU_DISP_H - 24, l2, CALC_DIM, -1, 1);
-    hacku_display_flush_all();
+    int w2 = oled_text_w(&oled_font, l2);
+    oled_text(fb, &oled_font, (OLED_W - w2) / 2, OLED_H - 9, l2, 1);
+    hal_oled_flush_all();
 }
 
 void ui_bleatk_run(void) {
@@ -71,7 +65,9 @@ int ui_bleatk_key(hacku_key_t k) {
  * present, run the attack. 0 = "nothing selected" or "target not found"
  * was shown, caller must redirect to the scan page. */
 /* No running BLE attack yet: nothing to repaint. */
-int ui_bleatk_tick(void) { return 0; }
+int ui_bleatk_tick(void) {
+    return 0;
+}
 
 int ui_bleatk_require(void) {
     if (!tgt_ble_has()) {

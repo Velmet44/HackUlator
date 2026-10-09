@@ -7,8 +7,8 @@ import sys
 from PIL import Image
 
 path = sys.argv[1]
-y0 = int(sys.argv[2]) if len(sys.argv) > 2 else 296
-y1 = int(sys.argv[3]) if len(sys.argv) > 3 else 318
+y0 = int(sys.argv[2]) if len(sys.argv) > 2 else 55
+y1 = int(sys.argv[3]) if len(sys.argv) > 3 else 64
 
 im = Image.open(path).convert("RGB")
 w, h = im.size

@@ -8,7 +8,7 @@ from PIL import Image
 path = sys.argv[1]
 want = tuple(int(x) for x in sys.argv[2].split(","))
 y0 = int(sys.argv[3]) if len(sys.argv) > 3 else 0
-y1 = int(sys.argv[4]) if len(sys.argv) > 4 else 320
+y1 = int(sys.argv[4]) if len(sys.argv) > 4 else 64
 
 im = Image.open(path).convert("RGB")
 w, h = im.size
