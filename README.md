@@ -17,7 +17,8 @@ Target: classic **ESP32-WROOM**, 0.96" **SSD1306 128x64 OLED** (I2C), 6 buttons.
   1. **Deauth** — subtype `0xC`, reason 2. Works pre-authentication.
   2. **Disassoc** — subtype `0xA`, reason 1. Only meaningful to an already-associated client.
   3. **Deauth+Disassoc** — both frames every tick, catching stacks that honour one and ignore the other.
-  4. **Beacon spam** — broadcast fake AP beacons (random BSSID + random 1–10 char SSID, ESS+privacy caps) once per tick, so nearby scanners and clients see a stream of invented networks. No session target required; runs on channel 1 unless a target's channel is set.
+  4. **Beacon spam** — broadcast fake AP beacons once per tick, each invented AP holding a random locally-administered BSSID and a random 1–10 char SSID for ~1 s before rotating (so a client sweeping the channel catches a name instead of ten vanishing ones), with a plausible monotonic TSF timestamp. No session target required; runs on channel 1 unless a target's channel is set.
+  The attacks screen shows live counters in the bottom band: frames TXed (`f…`) plus, for beacon spam, how many fake APs have been announced (`a…`).
   Live status shows the mode, frames/sec and time remaining. Works on **stock ESP-IDF** via a WSL bypass (`wsl_bypasser.*`: overrides the driver's private frame-type gate + `-Wl,-zmuldefs`), because stock `esp_wifi_80211_tx()` rejects management frames.
 - Entry guards: choosing an attack with no target — or a target that has vanished — shows a message and redirects to the scan page
 - One radio at a time (WiFi torn down before BLE and vice versa); full teardown on lock (stealth + power)

@@ -4,8 +4,8 @@ deauth, confirm the frame counter climbs, stop it, confirm it stops, and
 relock. Screenshots to test_deauth/. Exit 0 = flow OK.
 
 Probes are lit-pixel counts in fixed layout bands (128x64 mono UI, 4x9
-font): title y0-9, attacks target y9-18, mode rows y19-54 (selection
-bar), status y55-64, detail footer y55-64.
+font): title y0-9, mode rows y10-45 (selection bar), status y46-54,
+counters y55-63, detail footer y55-63.
 """
 import os
 import sys
@@ -15,7 +15,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 from hk_test import Dev, POS, WHITE, BLACK, W, H  # noqa: E402
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "test_deauth")
-STATUS_Y = 55   # status line row set by ui_wifiatk.c layout
+STATUS_Y = 46   # status line row set by ui_wifiatk.c layout
+STATS_Y = 55    # counters row (frames / fake APs)
 
 
 def count(d, y0, y1, x0=0, x1=W):
@@ -121,25 +122,25 @@ def main():
         d.key("e")                # run
         d.pump(1.5)
         check(f"{name}: running", at_attacks_running())
-        band = lambda: bytes(d.fb[((STATUS_Y - 2) * W * 2):
-                                  ((STATUS_Y + 9) * W * 2)])
+        band = lambda: bytes(d.fb[((STATS_Y - 2) * W * 2):
+                                  ((STATS_Y + 9) * W * 2)])
         seen = set()
         for _ in range(10):
             d.pump(0.5)
             seen.add(band())
         check(f"{name}: counter advances", len(seen) > 1)
-        shot(f"8_{idx}_{name.replace('+', '_')}.png")
+        shot("8_%d_%s.png" % (idx, name.replace("+", "_")))
         d.key("e")                # stop
         d.pump(1.0)
 
-    stopped_band = bytes(d.fb[((STATUS_Y - 2) * W * 2):
-                              ((STATUS_Y + 9) * W * 2)])
+    stopped_band = bytes(d.fb[((STATS_Y - 2) * W * 2):
+                              ((STATS_Y + 9) * W * 2)])
     shot("9_stopped.png")
     check("stopped (idle status)", count(d, STATUS_Y, STATUS_Y + 9) >= 8)
     d.pump(1.5)
     check("counter frozen after stop",
-          bytes(d.fb[((STATUS_Y - 2) * W * 2):
-                     ((STATUS_Y + 9) * W * 2)]) == stopped_band)
+          bytes(d.fb[((STATS_Y - 2) * W * 2):
+                     ((STATS_Y + 9) * W * 2)]) == stopped_band)
 
     # 10. BACK -> menu
     d.key("b")

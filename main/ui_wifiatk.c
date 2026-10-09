@@ -14,8 +14,9 @@
 #include <stdio.h>
 
 #define ROW_H 9
-#define LIST_Y0 19        /* 4 mode rows: 19..54 */
-#define STATUS_Y 55       /* status band: 55..63 */
+#define LIST_Y0 10        /* 4 mode rows: 10..45 */
+#define STATUS_Y 46       /* status band: 46..54 */
+#define STATS_Y 55        /* counters band: 55..63 */
 
 static int s_timed_out = 0;   /* last run ended on its own 3-min timeout */
 static deauth_mode_t s_sel = DEAUTH_MODE_DEAUTH; /* attack list cursor */
@@ -32,21 +33,45 @@ static void draw_msg(const char *l1, const char *l2) {
     hal_oled_flush_all();
 }
 
+/* Counters band: target name + what has actually been sent this run.
+ * Beacon spam counts fake APs (identities a scanner has had time to see);
+ * the deauth family counts frames. Clamped ints keep snprintf safe under
+ * -Werror=all. */
+static void draw_stats(oled_fb_t *fb) {
+    char st[33];
+    const char *ssid = tgt_wifi_ssid();
+    if (svc_deauth_mode() == DEAUTH_MODE_BEACON) {
+        unsigned long n = (unsigned long)svc_deauth_frames();
+        unsigned long ap = (unsigned long)svc_deauth_fake_aps();
+        if (n > 9999999UL) {
+            n = 9999999UL;
+        }
+        if (ap > 999999UL) {
+            ap = 999999UL;
+        }
+        snprintf(st, sizeof(st), "f%lu a%lu", n, ap);
+    } else {
+        unsigned long n = (unsigned long)svc_deauth_frames();
+        if (n > 9999999UL) {
+            n = 9999999UL;
+        }
+        snprintf(st, sizeof(st), "f%lu %.9s",
+                 n, ssid[0] ? ssid : "<hidden>");
+    }
+    st[32] = 0;
+    int sw = oled_text_w(&oled_font, st);
+    oled_text(fb, &oled_font, (OLED_W - sw) / 2, STATS_Y, st, 1);
+}
+
 static void draw(void) {
     oled_fb_t *fb = hal_oled_fb();
     oled_clear(fb, 0);
     const char *head = "WiFi attacks";
     int hw = oled_text_w(&oled_font, head);
     oled_text(fb, &oled_font, (OLED_W - hw) / 2, 0, head, 1);
-    {
-        char t[33];
-        const char *ssid = tgt_wifi_ssid();
-        snprintf(t, sizeof(t), ">%.27s", ssid[0] ? ssid : "<hidden>");
-        t[32] = 0;
-        int tw = oled_text_w(&oled_font, t);
-        oled_text(fb, &oled_font, (OLED_W - tw) / 2, 9, t, 1);
-    }
-    /* Attack list (UP/DOWN navigates, OK runs the selected one). */
+    /* Attack list (UP/DOWN navigates, OK runs the selected one). The
+     * target line moved into the stats band: 4 modes + status + counters
+     * is all that fits in 64 px. */
     for (int i = 0; i < DEAUTH_MODE_COUNT; i++) {
         int y = LIST_Y0 + i * ROW_H;
         deauth_mode_t m = (deauth_mode_t)i;
@@ -77,6 +102,7 @@ static void draw(void) {
         int sw = oled_text_w(&oled_font, st);
         oled_text(fb, &oled_font, (OLED_W - sw) / 2, STATUS_Y, st, 1);
     }
+    draw_stats(fb);
     hal_oled_flush_all();
 }
 
@@ -106,9 +132,11 @@ int ui_wifiatk_tick(void) {
     }
     st[32] = 0;
     int sw = oled_text_w(&oled_font, st);
-    oled_fill_rect(fb, 0, STATUS_Y, OLED_W, 9, 0);
+    /* Repaint both bands (status + counters) as one 18 px strip. */
+    oled_fill_rect(fb, 0, STATUS_Y, OLED_W, 18, 0);
     oled_text(fb, &oled_font, (OLED_W - sw) / 2, STATUS_Y, st, 1);
-    hal_oled_flush(0, STATUS_Y, OLED_W, 9);
+    draw_stats(fb);
+    hal_oled_flush(0, STATUS_Y, OLED_W, 18);
     return 1;
 }
 

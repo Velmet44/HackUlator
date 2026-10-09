@@ -36,6 +36,11 @@ void svc_deauth_stop(void);
 int svc_deauth_running(void);
 uint32_t svc_deauth_frames(void); /* frames TXed since start */
 uint32_t svc_deauth_ticks(void);  /* TX callback invocations (timer alive) */
+/* Beacon-spam counters: frames sent (frames), fake AP identities rolled
+ * this run (fake_aps) - a scanner only sees a name once its dwell window
+ * finishes, so fake_aps lags frames by one identity. */
+uint32_t svc_deauth_beacons(void);
+uint32_t svc_deauth_fake_aps(void);
 int svc_deauth_tx_error(void);    /* esp_err of first TX failure, 0 = none */
 int svc_deauth_beacon_ok(void);   /* 1 if the driver accepts beacon frames */
 

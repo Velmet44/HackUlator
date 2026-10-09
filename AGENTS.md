@@ -29,8 +29,11 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   `svc_deauth.*` — WiFi deauth-family flood (100 ms esp_timer TX loop,
   `esp_wifi_80211_tx`). Four modes via `deauth_mode_t`: DEAUTH (0xC),
   DISASSOC (0xA), COMBINED (both per tick, so the fps is ~20), BEACON
-  (0x80 fake-AP beacon per tick with a random BSSID + 1-10 char random
-  SSID; the only mode that does not need a session target).
+  (0x80 fake-AP beacon per tick; random locally-administered BSSID +
+  1-10 char random SSID held for `BEACON_DWELL_TICKS` (~1 s) per
+  identity, monotonic TSF; the only mode that needs no session target).
+  The attacks screen keeps a counters band (`f<frames> a<fake APs>`)
+  under the status line - `svc_deauth_frames()` / `svc_deauth_fake_aps()`.
   `ui_wifiatk_tick()` repaints only the status band; main loop calls it
   every 500 ms. It is also where the auto-stop is
   honoured: the TX callback only sets `svc_deauth_expired()` (a timer must
