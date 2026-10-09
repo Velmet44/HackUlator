@@ -255,6 +255,18 @@ def run_viewer(port=None, baud=460800, echo_log=True, no_reset=False,
     except Exception:
         ImageTk = None
 
+    try:
+        # Opt out of Windows DPI bitmap-scaling: without this, Windows
+        # upscales the whole Tk window (blurring the integer-zoomed OLED
+        # pixels). Per-monitor aware on Win 8.1+, system-aware fallback.
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
     root = tk.Tk()
     root.title(f"HACKULATOR — {port} @ {baud}")
     root.configure(bg="black")
