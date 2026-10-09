@@ -62,27 +62,19 @@ static int enter_menu_item(int sel, screen_t *screen_out) {
         svc_deauth_stop();
         svc_ble_stop();
         svc_wifi_teardown();              /* attacks start radio-cold */
-        if (ui_wifiatk_require()) {
-            *screen_out = SCR_WIFIATK;
-            ui_wifiatk_run();
-        } else {
-            /* nothing selected / target gone: scan page */
-            *screen_out = SCR_WIFISCAN;
-            ui_wifiscan_run();
-        }
+        /* Enter the screen unconditionally: target verification happens
+         * when an attack that needs one is launched (beacon spam does
+         * not), so no scan is forced just by opening the list. */
+        *screen_out = SCR_WIFIATK;
+        ui_wifiatk_run();
         return 1;
     }
     if (sel == 3) {                       /* BLE attacks */
         svc_deauth_stop();
         svc_ble_stop();
         svc_wifi_teardown();
-        if (ui_bleatk_require()) {
-            *screen_out = SCR_BLEATK;
-            ui_bleatk_run();
-        } else {
-            *screen_out = SCR_BLESCAN;
-            ui_blescan_run();
-        }
+        *screen_out = SCR_BLEATK;
+        ui_bleatk_run();
         return 1;
     }
     return 0;
@@ -182,12 +174,21 @@ void app_main(void) {
                     show_menu();
                 }
             } else if (screen == SCR_WIFIATK) {
-                if (ui_wifiatk_key(k)) {
+                int r = ui_wifiatk_key(k);
+                if (r == WIFATK_EXIT_SCAN) {
+                    /* no/vanished target: bounce to the scan page */
+                    screen = SCR_WIFISCAN;
+                    ui_wifiscan_run();
+                } else if (r == WIFATK_EXIT_MENU) {
                     screen = SCR_MENU;
                     show_menu();
                 }
             } else if (screen == SCR_BLEATK) {
-                if (ui_bleatk_key(k)) {
+                int r = ui_bleatk_key(k);
+                if (r == BLEATK_EXIT_SCAN) {
+                    screen = SCR_BLESCAN;
+                    ui_blescan_run();
+                } else if (r == BLEATK_EXIT_MENU) {
                     screen = SCR_MENU;
                     show_menu();
                 }

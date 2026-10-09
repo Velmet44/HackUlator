@@ -105,22 +105,31 @@ def main():
     check("back at menu", at_menu())
     shot("6_menu_target.png")
 
-    # 6. WiFi attacks (menu item 3)
+    # 6. WiFi attacks (menu item 3) - entry no longer verifies a target
     d.key("s"); d.pump(0.3)
     d.key("s"); d.pump(0.3)
     d.key("e")
-    d.pump(12.0)   # entry does a verifying rescan (blocking ~2-3s)
-    check("wifi attacks screen (target verified)", at_attacks_idle())
+    d.pump(2.0)   # screen appears immediately, no verifying rescan
+    check("wifi attacks screen", at_attacks_idle())
     shot("7_attacks.png")
 
-    # 7. run every attack mode (UP/DOWN selects, OK runs then stops)
+    # 7. run every attack mode (UP/DOWN selects, OK runs then stops).
+    # The deauth family verifies its target on OK (blocking scan), beacon
+    # spam opens the SSID-list picker instead and needs no target.
     modes = ["Deauth", "Disassoc", "Deauth_Disassoc", "BeaconSpam"]
     for idx, name in enumerate(modes):
         if idx:
             d.key("s")           # DOWN to the next attack
             d.pump(0.5)
-        d.key("e")                # run
-        d.pump(1.5)
+        d.key("e")                # run (or open the picker, for beacon)
+        if name == "BeaconSpam":
+            d.pump(1.0)
+            check("SSID list picker opens", count(d, 0, 9) >= 6)
+            shot("8a_picker.png")
+            d.key("e")            # confirm the highlighted list
+            d.pump(1.5)
+        else:
+            d.pump(9.0)           # verifying rescan, then start
         check(f"{name}: running", at_attacks_running())
         band = lambda: bytes(d.fb[((STATS_Y - 2) * W * 2):
                                   ((STATS_Y + 9) * W * 2)])

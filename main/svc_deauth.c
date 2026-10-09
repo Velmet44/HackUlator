@@ -12,8 +12,13 @@
 static const char *TAG = "svc_deauth";
 
 #define BEACON_POOL_MAX     20   /* Hydra-ESP's default live-AP count */
-#define BEACON_POOL_DEFAULT 12
+#define BEACON_POOL_DEFAULT 20
 #define BEACON_SSID_MAX     32   /* 802.11 caps SSIDs at 32 octets */
+/* Ticks (x100 ms) held on one channel before hopping. A scanning client
+ * sweeps all 13 channels, so pinning to one only ever exposes the pool to
+ * the slice of scan time it spends there. */
+#define BEACON_HOP_TICKS    3
+#define BEACON_CH_MAX       13
 
 typedef struct {
     uint8_t bssid[6];
@@ -27,6 +32,9 @@ static beacon_ap_t s_pool[BEACON_POOL_MAX]; /* fake APs live this run */
 static int s_pool_count = 0;      /* entries actually beaconing */
 static uint32_t s_beacons = 0;    /* fake APs in the pool */
 static int s_channel = 1;         /* pinned channel, clamped 1..13 */
+static int s_chan_cursor = 0;     /* beacon-mode hop cursor (0 -> hop to 1) */
+static int s_hop_left = 0;        /* ticks left before the next hop */
+static beacon_name_mode_t s_name_mode = BEACON_NAMES_COMMON;
 static volatile uint32_t s_frames = 0;
 static volatile int s_tx_err = 0;      /* first TX error since start */
 static volatile int s_tx_errcode = 0;
@@ -148,9 +156,71 @@ static const char *const s_suffixes[] = {
 #define N_BASES    (sizeof(s_bases) / sizeof(s_bases[0]))
 #define N_SUFFIXES (sizeof(s_suffixes) / sizeof(s_suffixes[0]))
 
+static const char *const s_rick[] = {
+    "Never Gonna Give You Up", "Never Gonna Let You Down",
+    "Never Gonna Run Around", "And Desert You",
+    "Never Gonna Make You Cry", "Never Gonna Say Goodbye",
+};
+static const char *const s_secure[] = {
+    "FBI Surveillance Van 04", "Virus.exe", "Get Off My LAN",
+    "Loading...", "Searching...", "Click for virus",
+};
+#define N_RICK    (sizeof(s_rick) / sizeof(s_rick[0]))
+#define N_SECURE  (sizeof(s_secure) / sizeof(s_secure[0]))
+
+/* Copy a name into the pool entry, clamped to the 802.11 SSID cap. */
+static void ap_set_name(beacon_ap_t *ap, const char *s) {
+    int n = 0;
+    while (s[n] && n < BEACON_SSID_MAX) {
+        ap->ssid[n] = s[n];
+        n++;
+    }
+    ap->ssid[n] = 0;
+    ap->ssid_len = n;
+}
+
+/* Fill ap->ssid from one list. index makes the fixed lists walk in order
+ * instead of repeating (seeded so a pool is a mix, not one name). */
+static void ap_name_from(beacon_ap_t *ap, beacon_name_mode_t m, int index) {
+    char tmp[BEACON_SSID_MAX + 1];
+    switch (m) {
+        case BEACON_NAMES_COMMON:
+            snprintf(tmp, sizeof(tmp), "%s%s",
+                     s_bases[esp_random() % N_BASES],
+                     s_suffixes[esp_random() % N_SUFFIXES]);
+            ap_set_name(ap, tmp);
+            break;
+        case BEACON_NAMES_GARBAGE: {
+            static const char charset[] =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                "0123456789!@#$%^&*()_+-=[]{}|;";
+            const size_t clen = sizeof(charset) - 1;
+            int len = 8 + (int)(esp_random() % 12);
+            if (len > BEACON_SSID_MAX) {
+                len = BEACON_SSID_MAX;
+            }
+            for (int i = 0; i < len; i++) {
+                tmp[i] = charset[esp_random() % clen];
+            }
+            tmp[len] = 0;
+            ap_set_name(ap, tmp);
+            break;
+        }
+        case BEACON_NAMES_RICKROLL:
+            ap_set_name(ap, s_rick[(size_t)index % N_RICK]);
+            break;
+        case BEACON_NAMES_SECURITY:
+            ap_set_name(ap, s_secure[(size_t)index % N_SECURE]);
+            break;
+        default:   /* BEACON_NAMES_ALL: one source per entry */
+            ap_name_from(ap, (beacon_name_mode_t)(esp_random() %
+                            (BEACON_NAMES_COUNT - 1)), index);
+            break;
+    }
+}
+
 /* Build the pool of fake APs. BSSIDs are locally administered (unicast,
- * bit 1 set) so they cannot collide with a real vendor OUI; the name is a
- * shuffled vendor x suffix pair so entries are unique. */
+ * bit 1 set) so they cannot collide with a real vendor OUI. */
 static void beacon_pool_build(int count) {
     if (count < 1) {
         count = 1;
@@ -158,32 +228,19 @@ static void beacon_pool_build(int count) {
     if (count > BEACON_POOL_MAX) {
         count = BEACON_POOL_MAX;
     }
-    /* Partial Fisher-Yates over the base x suffix combos: unique names,
-     * random order, no retry loop. */
-    uint8_t order[N_BASES * N_SUFFIXES];
-    const size_t n_combo = N_BASES * N_SUFFIXES;
-    for (size_t i = 0; i < n_combo; i++)
-        order[i] = (uint8_t)i;
-    for (int i = 0; i < count && (size_t)i < n_combo; i++) {
-        size_t j = (size_t)i + (size_t)(esp_random() % (n_combo - i));
-        uint8_t tmp = order[i];
-        order[i] = order[j];
-        order[j] = tmp;
-    }
     for (int i = 0; i < count; i++) {
         beacon_ap_t *ap = &s_pool[i];
         for (int k = 0; k < 6; k++)
             ap->bssid[k] = (uint8_t)esp_random();
         ap->bssid[0] |= 0x02;            /* locally administered */
         ap->bssid[0] &= (uint8_t)~0x01;  /* unicast */
-        uint8_t c = order[i];
-        snprintf(ap->ssid, sizeof(ap->ssid), "%s%s",
-                 s_bases[c % N_BASES], s_suffixes[c / N_BASES]);
-        ap->ssid[BEACON_SSID_MAX] = 0;
-        ap->ssid_len = (int)strlen(ap->ssid);
-        if (ap->ssid_len > BEACON_SSID_MAX) {
-            ap->ssid_len = BEACON_SSID_MAX;
+        /* ALL picks a source per entry, so seed the fixed lists with the
+         * entry index to keep the pool varied rather than one repeated. */
+        beacon_name_mode_t m = s_name_mode;
+        if (m == BEACON_NAMES_ALL) {
+            m = (beacon_name_mode_t)(esp_random() % (BEACON_NAMES_COUNT - 1));
         }
+        ap_name_from(ap, m, i + (int)(esp_random() % 7));
     }
     s_pool_count = count;
     s_beacons = (uint32_t)count;
@@ -198,6 +255,19 @@ static void tx_tick(void *arg) {
     int ok_count = 0;
     esp_err_t err = ESP_OK;
     if (s_mode == DEAUTH_MODE_BEACON) {
+        /* Hop across the band so a channel-sweeping client meets the pool
+         * everywhere instead of only on one pinned channel. */
+        if (s_hop_left <= 0) {
+            s_hop_left = BEACON_HOP_TICKS;
+            s_chan_cursor++;
+            if (s_chan_cursor > BEACON_CH_MAX) {
+                s_chan_cursor = 1;
+            }
+            esp_wifi_set_channel((uint8_t)s_chan_cursor,
+                                WIFI_SECOND_CHAN_NONE);
+            s_channel = s_chan_cursor;
+        }
+        s_hop_left--;
         /* Every pool entry beacons every tick (Hydra-ESP behaviour): the
          * whole fake estate is live at once, so a scan list keeps them
          * all instead of expiring the ones that went quiet. */
@@ -305,6 +375,8 @@ int svc_deauth_start(deauth_mode_t mode) {
     s_last_err = 0;
     s_pool_count = 0;
     s_beacons = 0;
+    s_chan_cursor = 0;
+    s_hop_left = 0;
     if (s_mode == DEAUTH_MODE_BEACON)
         beacon_pool_build(BEACON_POOL_DEFAULT);
     s_expired = 0;
@@ -376,6 +448,34 @@ uint32_t svc_deauth_remaining_s(void) {
 }
 
 deauth_mode_t svc_deauth_mode(void) { return s_mode; }
+
+int svc_deauth_mode_needs_target(deauth_mode_t m) {
+    return m != DEAUTH_MODE_BEACON;
+}
+
+void svc_deauth_set_name_mode(beacon_name_mode_t m) {
+    if (m >= BEACON_NAMES_COUNT) {
+        m = BEACON_NAMES_COMMON;
+    }
+    s_name_mode = m;
+}
+
+beacon_name_mode_t svc_deauth_name_mode(void) { return s_name_mode; }
+
+const char *svc_deauth_name_mode_name(beacon_name_mode_t m) {
+    switch (m) {
+        case BEACON_NAMES_COMMON:   return "COMMON";
+        case BEACON_NAMES_GARBAGE:  return "GARBAGE";
+        case BEACON_NAMES_RICKROLL: return "RICKROLL";
+        case BEACON_NAMES_SECURITY: return "SECURITY";
+        case BEACON_NAMES_ALL:      return "ALL";
+        default:                    return "?";
+    }
+}
+
+uint32_t svc_deauth_beacon_pool(void) {
+    return (uint32_t)BEACON_POOL_DEFAULT;
+}
 
 const char *svc_deauth_mode_name(deauth_mode_t m) {
     switch (m) {

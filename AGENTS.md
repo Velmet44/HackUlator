@@ -24,17 +24,23 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
 * `main.c` — screen state machine (`SCR_*`), menu dispatch, relock paths.
 * `ui_calc.c` — calculator disguise (unlock is `4+6=`).
 * `ui_menu.c` — top menu. `ui_wifiscan.*` / `ui_blescan.*` — scan + detail.
-* `ui_wifiatk.*` / `ui_bleatk.*` — attack screens + `ui_*_require()` entry
-  guards (no target / target gone → caller must show scan page).
+* `ui_wifiatk.*` / `ui_bleatk.*` — attack screens. Verification is **not**
+  an entry guard: `main.c` opens the list immediately, and
+  `ui_wifiatk_key()` verifies only when a mode that needs a target is
+  launched, returning `WIFATK_EXIT_SCAN` so the caller opens the scan
+  page. Beacon spam skips it and opens the SSID-list picker instead.
   `svc_deauth.*` — WiFi deauth-family flood (100 ms esp_timer TX loop,
   `esp_wifi_80211_tx`). Four modes via `deauth_mode_t`: DEAUTH (0xC),
   DISASSOC (0xA), COMBINED (both per tick, so the fps is ~20), BEACON
-  (pool of `BEACON_POOL_DEFAULT` fake APs, every one beaconing on every
-  tick - Hydra-ESP's model; rotating a single identity instead leaves
-  only one alive and clients expire the rest). Names are vendor-plausible
-  (`s_bases` x `s_suffixes`), BSSIDs locally administered, monotonic TSF.
-  The attacks screen keeps a counters band (`f<frames> a<live fake APs>`)
-  under the status line - `svc_deauth_frames()` / `svc_deauth_fake_aps()`.
+  (pool of `BEACON_POOL_DEFAULT`=20 fake APs, every one beaconing on
+  every tick - Hydra-ESP's model; rotating a single identity instead
+  leaves only one alive and clients expire the rest). Channel-hopped
+  across 1..13 every `BEACON_HOP_TICKS`=3 ticks. SSID sources
+  `beacon_name_mode_t` (COMMON/GARBAGE/RICKROLL/SECURITY/ALL) chosen in
+  the picker; BSSIDs locally administered, monotonic TSF.
+  The attacks screen keeps a counters band
+  (`f<frames> a<live fake APs> <list>`) under the status line -
+  `svc_deauth_frames()` / `svc_deauth_fake_aps()`.
   `ui_wifiatk_tick()` repaints only the status band; main loop calls it
   every 500 ms. It is also where the auto-stop is
   honoured: the TX callback only sets `svc_deauth_expired()` (a timer must

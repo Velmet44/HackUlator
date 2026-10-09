@@ -58,7 +58,7 @@ void ui_bleatk_run(void) {
 }
 
 int ui_bleatk_key(hacku_key_t k) {
-    return k == KEY_BACK ? 1 : 0;
+    return k == KEY_BACK ? BLEATK_EXIT_MENU : 0;
 }
 
 /* Entry guard for anything needing the BLE target: 1 = target verified

@@ -17,10 +17,16 @@ Target: classic **ESP32-WROOM**, 0.96" **SSD1306 128x64 OLED** (I2C), 6 buttons.
   1. **Deauth** — subtype `0xC`, reason 2. Works pre-authentication.
   2. **Disassoc** — subtype `0xA`, reason 1. Only meaningful to an already-associated client.
   3. **Deauth+Disassoc** — both frames every tick, catching stacks that honour one and ignore the other.
-  4. **Beacon spam** — broadcasts a pool of **12 fake APs simultaneously**: each one has a locally-administered BSSID and a vendor-plausible name (`TP-Link_WiFi`, `Free Public WiFi`, …) and every entry beacons on every 100 ms tick, holding its identity for the whole run. Rotating a single identity at a time leaves only one entry alive at any moment and scan lists expire the rest within seconds — this pool model is why all of them stay listed. No session target required; runs on channel 1 unless a target's channel is set.
-  The attacks screen shows live counters in the bottom band: frames TXed (`f…`) plus, for beacon spam, how many fake APs are live (`a…`).
+  4. **Beacon spam** — broadcasts a pool of **20 fake APs** that all beacon on every tick, and **hops channels** (1→13, 300 ms each) so a channel-sweeping client meets the pool across the whole band instead of on one pinned channel. Pressing OK on it opens an **SSID-list picker** first:
+  - `COMMON` — vendor-plausible names (`TP-Link_WiFi`, `Free Public WiFi`, …)
+  - `GARBAGE` — random printable junk
+  - `RICKROLL` — rickroll bait names
+  - `SECURITY` — scam / scare names
+  - `ALL` — one of the above per pool entry
+  Rotating a single identity at a time leaves only one entry alive and scan lists expire the rest, so the pool stays fixed for the whole run. Needs no session target.
+  The attacks screen shows live counters in the bottom band: frames TXed (`f…`) plus, for beacon spam, live fake APs and the chosen list (`f… a20 COMMON`).
   Live status shows the mode, frames/sec and time remaining. Works on **stock ESP-IDF** via a WSL bypass (`wsl_bypasser.*`: overrides the driver's private frame-type gate + `-Wl,-zmuldefs`), because stock `esp_wifi_80211_tx()` rejects management frames.
-- Entry guards: choosing an attack with no target — or a target that has vanished — shows a message and redirects to the scan page
+- Entry guards: choosing an attack that needs a target when none is set — or one that has vanished — shows a message and redirects to the scan page. The check runs when the attack is **launched**, not when the attacks screen is opened, so self-targeting modes (beacon spam) never trigger a scan
 - One radio at a time (WiFi torn down before BLE and vice versa); full teardown on lock (stealth + power)
 - SSD1306 probe at boot (I2C 0x3C/0x3D); without an OLED the device still runs caster-only
 - PKC dirty-rect caster mirror (always on): mono OLED pixels expanded to RGB565 white/black over UART0 @ 460800 baud + remote keys from viewer

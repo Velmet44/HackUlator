@@ -19,9 +19,32 @@ typedef enum {
     DEAUTH_MODE_DEAUTH = 0,   /* 0xC only, reason 0x02 */
     DEAUTH_MODE_DISASSOC = 1, /* 0xA only, reason 0x01 */
     DEAUTH_MODE_COMBINED = 2, /* 0xC + 0xA per tick */
-    DEAUTH_MODE_BEACON = 3,   /* 0x80 beacon per tick, random SSID/BSSID */
+    DEAUTH_MODE_BEACON = 3,   /* pool of fake-AP beacons, channel-hopped */
     DEAUTH_MODE_COUNT
 } deauth_mode_t;
+
+/* 1 = this mode needs a session target and must be verified before it
+ * runs; 0 = it invents its own targets (beacon spam). */
+int svc_deauth_mode_needs_target(deauth_mode_t m);
+
+/* Beacon-spam SSID sources (Hydra-ESP's sets, plus ALL = mixed pool). */
+typedef enum {
+    BEACON_NAMES_COMMON = 0,  /* vendor-plausible: "Netgear_WiFi" */
+    BEACON_NAMES_GARBAGE,      /* random printable junk */
+    BEACON_NAMES_RICKROLL,     /* rickroll bait */
+    BEACON_NAMES_SECURITY,     /* scam / scare names */
+    BEACON_NAMES_ALL,          /* one of the above per pool entry */
+    BEACON_NAMES_COUNT
+} beacon_name_mode_t;
+
+/* Select the name source. Rebuys the pool at the next start (or now, when
+ * idle). Stored across runs. */
+void svc_deauth_set_name_mode(beacon_name_mode_t m);
+beacon_name_mode_t svc_deauth_name_mode(void);
+const char *svc_deauth_name_mode_name(beacon_name_mode_t m);
+
+/* Fake APs kept live (all beacon every tick). */
+uint32_t svc_deauth_beacon_pool(void);
 
 /* Start on the current session WiFi target (must be set).
  * Brings STA up + PS_NONE + channel pin; 100 ms esp_timer TX loop.
