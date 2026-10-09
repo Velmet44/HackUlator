@@ -9,11 +9,22 @@
 
 #include <stdint.h>
 
+/* Attack modes. 0xC = deauth (works pre-auth), 0xA = disassociation
+ * (only meaningful to an already-associated client). Combined sends both
+ * every tick, which catches stacks that honour one and ignore the other.
+ * Frame layouts follow Hydra-ESP's wsl_bypasser templates. */
+typedef enum {
+    DEAUTH_MODE_DEAUTH = 0,   /* 0xC only, reason 0x02 */
+    DEAUTH_MODE_DISASSOC = 1, /* 0xA only, reason 0x01 */
+    DEAUTH_MODE_COMBINED = 2, /* 0xC + 0xA per tick */
+    DEAUTH_MODE_COUNT
+} deauth_mode_t;
+
 /* Start on the current session WiFi target (must be set).
  * Brings STA up + PS_NONE + channel pin; 100 ms esp_timer TX loop.
  * Auto-stops after DEAUTH_TIMEOUT_S (see svc_deauth_expired()).
  * 0 ok; <0 stage error (-1 no target, -2 wifi init, -3 channel, -6 tx). */
-int svc_deauth_start(void);
+int svc_deauth_start(deauth_mode_t mode);
 
 /* Stop the TX loop. Safe when already stopped. Must run before any
  * WiFi/BLE teardown so the timer never touches a dead radio. */
@@ -32,4 +43,6 @@ int svc_deauth_expired(void);
 uint32_t svc_deauth_fps(void);      /* smoothed frames/second */
 uint32_t svc_deauth_elapsed_s(void);
 uint32_t svc_deauth_remaining_s(void); /* 0 once expired */
+deauth_mode_t svc_deauth_mode(void);   /* mode currently running */
+const char *svc_deauth_mode_name(deauth_mode_t m); /* short UI label */
 #define DEAUTH_TIMEOUT_S 180         /* 3 minutes */

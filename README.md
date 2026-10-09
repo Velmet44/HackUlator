@@ -13,7 +13,11 @@ Target: classic **ESP32-WROOM**, 2.8" **ILI9341 240x320** portrait TFT, 6 button
 - **WiFi scan**: sorted by RSSI; detail shows MAC / RSSI / channel / auth / ciphers / PHY / WPS / FTM / country
 - **BLE scan** (~5 s): deduped by MAC; detail shows name / MAC / RSSI / addr type / adv type / TX / flags / service UUID / manufacturer
 - **Session attack targets**: pick a target from any scan detail view with RIGHT (button flips to green `selected`); stored in RAM only, cleared on reboot. Separate slots for WiFi (keyed by BSSID) and BLE (keyed by MAC).
-- **WiFi attacks → 1. Deauth**: raw broadcast 802.11 deauth flood against the stored target at 100 ms cadence. Live status shows frames/sec, cumulative frames and time remaining. **Auto-stops after 3 minutes** (`DEAUTH_TIMEOUT_S`) so a forgotten run cannot jam the channel indefinitely. Works on **stock ESP-IDF** via a WSL bypass (`wsl_bypasser.*`: overrides the driver's private frame-type gate + `-Wl,-zmuldefs`), because stock `esp_wifi_80211_tx()` rejects management frames.
+- **WiFi attacks** (UP/DOWN selects, OK runs, 100 ms cadence, 3-minute auto-stop):
+  1. **Deauth** — subtype `0xC`, reason 2. Works pre-authentication.
+  2. **Disassoc** — subtype `0xA`, reason 1. Only meaningful to an already-associated client.
+  3. **Deauth+Disassoc** — both frames every tick, catching stacks that honour one and ignore the other.
+  Live status shows the mode, frames/sec and time remaining. Works on **stock ESP-IDF** via a WSL bypass (`wsl_bypasser.*`: overrides the driver's private frame-type gate + `-Wl,-zmuldefs`), because stock `esp_wifi_80211_tx()` rejects management frames.
 - Entry guards: choosing an attack with no target — or a target that has vanished — shows a message and redirects to the scan page
 - One radio at a time (WiFi torn down before BLE and vice versa); full teardown on lock (stealth + power)
 - ILI9341 auto-detect (RDDID); falls back to **caster mode** when no TFT answers
@@ -107,6 +111,8 @@ AGENTS.md        repo conventions, build commands, hard constraints
 **Deauth is 2.4 GHz only.** The ESP32 cannot touch 5 GHz, so a client on `SSID-5G` is unaffected even while the flood runs. Target the 2.4 GHz SSID and confirm the client is on that band.
 
 **Deauth floods everything on the channel.** The frames are broadcast, so unrelated devices on the same channel (including neighbours') will also be dropped. Keep runs short and test away from others.
+
+**Deauth vs Disassoc.** Both are unauthenticated management frames — the ESP32 needs no connection and no password to send either. The difference is on the victim: deauth (`0xC`) also hits a client that is merely *trying* to associate, while disassociation (`0xA`) only means anything to a client already associated. Neither captures credentials; both are availability attacks.
 
 ## Credits
 

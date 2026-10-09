@@ -72,6 +72,12 @@ int svc_wifi_scan(wifi_ap_t *out, int max) {
      * internally, so a huge request here just fragments the heap. */
     if (n > 8)
         n = 8;
+    if (n == 0) {
+        /* Empty scan is a valid result, not an OOM: malloc(0) returns NULL
+         * and used to be reported as a bogus failure (-5). */
+        ESP_LOGI(TAG, "scan: no APs found");
+        return 0;
+    }
     ESP_LOGI(TAG, "scan: %u aps, rec %u B, largest %u",
              (unsigned)n, (unsigned)(sizeof(wifi_ap_record_t) * n),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));

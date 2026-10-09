@@ -77,11 +77,11 @@ def main():
     def at_attacks_idle():
         return (count(d, ORANGE, 8, 30) >= 10 and
                 count(d, GREEN, 44, 66) >= 20 and
-                count(d, DIM, 130, 160) >= 20)
+                count(d, DIM, 168, 192) >= 8)
 
     def at_attacks_running():
         return (count(d, ORANGE, 8, 30) >= 10 and
-                count(d, RED, 130, 160) >= 10)
+                count(d, RED, 168, 192, 40, 210) >= 10)
 
     def at_selected_footer():
         return count(d, GREEN, 296, 318, 140, 236) >= 30
@@ -128,29 +128,32 @@ def main():
     check("wifi attacks screen (target verified)", at_attacks_idle())
     shot("7_attacks.png")
 
-    # 7. start deauth
-    d.key("e")
-    d.pump(1.5)
-    check("deauth running (red status)", at_attacks_running())
-    shot("8_running.png")
+    # 7. run every attack mode (UP/DOWN selects, OK runs then stops)
+    modes = ["Deauth", "Disassoc", "Deauth+Disassoc"]
+    STATUS_Y = 168   # status line row set by ui_wifiatk.c layout
+    for idx, name in enumerate(modes):
+        if idx:
+            d.key("s")           # DOWN to the next attack
+            d.pump(0.5)
+        d.key("e")                # run
+        d.pump(1.5)
+        check(f"{name}: running", at_attacks_running())
+        band = lambda: bytes(d.fb[((STATUS_Y - 6) * 240 * 2):
+                                  ((STATUS_Y + 24) * 240 * 2)])
+        seen = set()
+        for _ in range(10):
+            d.pump(0.5)
+            seen.add(band())
+        check(f"{name}: counter advances", len(seen) > 1)
+        shot(f"8_{idx}_{name.replace('+', '_')}.png")
+        d.key("e")                # stop
+        d.pump(1.0)
 
-    # 8. frame counter advances. The tick repaints the status band every
-    # ~500 ms; sample it repeatedly and require at least one distinct band.
-    band = lambda: bytes(d.fb[(130 * 240 * 2):(160 * 240 * 2)])
-    seen = set()
-    for _ in range(14):
-        d.pump(0.5)
-        seen.add(band())
-    check("frame counter advances", len(seen) > 1)
-    shot("9_running_later.png")
-
-    # 9. stop
-    d.key("e")
-    d.pump(1.0)
     stopped = bytes(d.fb)
-    stopped_band = bytes(d.fb[(130 * 240 * 2):(160 * 240 * 2)])
-    shot("10_stopped.png")
-    check("stopped (idle status)", count(d, DIM, 130, 160) >= 20)
+    stopped_band = bytes(d.fb[((STATUS_Y - 6) * 240 * 2):
+                              ((STATUS_Y + 24) * 240 * 2)])
+    shot("9_stopped.png")
+    check("stopped (idle status)", count(d, DIM, STATUS_Y, STATUS_Y + 24) >= 8)
     d.pump(1.5)
     check("counter frozen after stop",
           bytes(d.fb[(130 * 240 * 2):(160 * 240 * 2)]) == stopped_band)

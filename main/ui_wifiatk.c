@@ -14,10 +14,12 @@
 #include "freertos/task.h"
 #include <stdio.h>
 
-#define ROW_H 30
-#define LIST_Y0 52
+#define ROW_H 28
+#define LIST_Y0 70
 
-static int s_timed_out = 0; /* last run ended on its own 3-min timeout */
+static int s_timed_out = 0;   /* last run ended on its own 3-min timeout */
+static deauth_mode_t s_sel = DEAUTH_MODE_DEAUTH; /* attack list cursor */
+static deauth_mode_t s_last = DEAUTH_MODE_DEAUTH; /* mode that last ran */
 
 static void draw_msg(const char *l1, const char *l2) {
     hacku_fb_t *fb = hacku_display_fb();
@@ -50,25 +52,31 @@ static void draw(void) {
         gfx_text(fb, &hacku_font, (HACKU_DISP_W - tw) / 2, 44,
                  t, C_GREEN, -1, 1);
     }
-    /* Attack list (UP/DOWN navigates, OK runs). */
-    {
-        int y = LIST_Y0 + 20, sel = 0;
-        gfx_fill_rect(fb, 4, y, HACKU_DISP_W - 8, ROW_H - 4, C_GRAY25);
-        gfx_text(fb, &hacku_font, 14, y + 4, "1. Deauth",
-                 C_WHITE, -1, 1);
-        (void)sel;
+    /* Attack list (UP/DOWN navigates, OK runs the selected one). */
+    for (int i = 0; i < DEAUTH_MODE_COUNT; i++) {
+        int y = LIST_Y0 + i * ROW_H;
+        deauth_mode_t m = (deauth_mode_t)i;
+        int on = (m == s_sel);
+        if (on)
+            gfx_fill_rect(fb, 4, y, HACKU_DISP_W - 8, ROW_H - 4, C_GRAY25);
+        char lb[24];
+        snprintf(lb, sizeof(lb), "%d. %s", i + 1, svc_deauth_mode_name(m));
+        gfx_text(fb, &hacku_font, 14, y + 3, lb,
+                 on ? C_WHITE : CALC_DIM, -1, 1);
     }
     /* Live status: rate, cumulative frames, time left. */
     {
         char st[32];
-        int y = LIST_Y0 + 84;
+        int y = LIST_Y0 + DEAUTH_MODE_COUNT * ROW_H + 14;
         if (svc_deauth_tx_error())
             snprintf(st, sizeof(st), "tx err %d", svc_deauth_tx_error());
         else if (svc_deauth_running())
-            snprintf(st, sizeof(st), "%lu/s %lu f  %lu s",
+            snprintf(st, sizeof(st), "%s %lu/s %lu s",
+                     svc_deauth_mode_name(svc_deauth_mode()),
                      (unsigned long)svc_deauth_fps(),
-                     (unsigned long)svc_deauth_frames(),
                      (unsigned long)svc_deauth_remaining_s());
+        else if (s_timed_out)
+            snprintf(st, sizeof(st), "done - timed out");
         else if (s_timed_out)
             snprintf(st, sizeof(st), "done - timed out");
         else
@@ -113,16 +121,17 @@ int ui_wifiatk_tick(void) {
     if (svc_deauth_tx_error())
         snprintf(st, sizeof(st), "tx err %d", svc_deauth_tx_error());
     else
-        snprintf(st, sizeof(st), "%lu/s %lu f  %lu s",
+        snprintf(st, sizeof(st), "%s %lu/s %lu s",
+                 svc_deauth_mode_name(svc_deauth_mode()),
                  (unsigned long)svc_deauth_fps(),
-                 (unsigned long)svc_deauth_frames(),
                  (unsigned long)svc_deauth_remaining_s());
     int sw = gfx_text_w(&hacku_font, st, 1);
     /* Erase the band, then redraw centred. */
-    gfx_fill_rect(fb, 0, 130, HACKU_DISP_W, 30, C_BLACK);
-    gfx_text(fb, &hacku_font, (HACKU_DISP_W - sw) / 2, 136,
+    int y = LIST_Y0 + DEAUTH_MODE_COUNT * ROW_H + 14;
+    gfx_fill_rect(fb, 0, y - 6, HACKU_DISP_W, 30, C_BLACK);
+    gfx_text(fb, &hacku_font, (HACKU_DISP_W - sw) / 2, y,
              st, C_RED, -1, 1);
-    hacku_display_flush(0, 130, HACKU_DISP_W, 30);
+    hacku_display_flush(0, y - 6, HACKU_DISP_W, 30);
     return 1;
 }
 
@@ -137,14 +146,26 @@ int ui_wifiatk_key(hacku_key_t k) {
         svc_deauth_stop(); /* leave the radio cold */
         return 1;
     }
+    if (k == KEY_UP) {
+        s_sel = (deauth_mode_t)((s_sel + DEAUTH_MODE_COUNT - 1) %
+                                DEAUTH_MODE_COUNT);
+        draw();
+        return 0;
+    }
+    if (k == KEY_DOWN) {
+        s_sel = (deauth_mode_t)((s_sel + 1) % DEAUTH_MODE_COUNT);
+        draw();
+        return 0;
+    }
     if (k == KEY_OK) {
         if (svc_deauth_running()) {
             svc_deauth_stop();
             s_timed_out = 0;
         } else {
             s_timed_out = 0;
-            svc_ble_stop();  /* deauth is WiFi-only */
-            int r = svc_deauth_start();
+            s_last = s_sel;
+            svc_ble_stop();  /* deauth family is WiFi-only */
+            int r = svc_deauth_start(s_sel);
             if (r < 0) {
                 const char *e =
                     r == -1 ? "no target" :
