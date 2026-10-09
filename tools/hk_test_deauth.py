@@ -4,8 +4,8 @@ deauth, confirm the frame counter climbs, stop it, confirm it stops, and
 relock. Screenshots to test_deauth/. Exit 0 = flow OK.
 
 Probes are lit-pixel counts in fixed layout bands (128x64 mono UI, 4x9
-font): title y0-10, attacks target y10-19, mode rows y20-47 (selection
-bar), status y47-56, detail footer y55-64.
+font): title y0-9, attacks target y9-18, mode rows y19-54 (selection
+bar), status y55-64, detail footer y55-64.
 """
 import os
 import sys
@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 from hk_test import Dev, POS, WHITE, BLACK, W, H  # noqa: E402
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "test_deauth")
-STATUS_Y = 47   # status line row set by ui_wifiatk.c layout
+STATUS_Y = 55   # status line row set by ui_wifiatk.c layout
 
 
 def count(d, y0, y1, x0=0, x1=W):
@@ -60,11 +60,11 @@ def main():
         return d.has_bar()
 
     def at_attacks_idle():
-        return (count(d, 0, 10) >= 8 and
+        return (count(d, 0, 9) >= 8 and
                 count(d, STATUS_Y, STATUS_Y + 9) >= 8)
 
     def at_attacks_running():
-        return (count(d, 0, 10) >= 8 and
+        return (count(d, 0, 9) >= 8 and
                 count(d, STATUS_Y, STATUS_Y + 9) >= 8)
 
     def at_selected_footer():
@@ -113,7 +113,7 @@ def main():
     shot("7_attacks.png")
 
     # 7. run every attack mode (UP/DOWN selects, OK runs then stops)
-    modes = ["Deauth", "Disassoc", "Deauth+Disassoc"]
+    modes = ["Deauth", "Disassoc", "Deauth_Disassoc", "BeaconSpam"]
     for idx, name in enumerate(modes):
         if idx:
             d.key("s")           # DOWN to the next attack

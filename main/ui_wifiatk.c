@@ -14,12 +14,11 @@
 #include <stdio.h>
 
 #define ROW_H 9
-#define LIST_Y0 20
-#define STATUS_Y 47
+#define LIST_Y0 19        /* 4 mode rows: 19..54 */
+#define STATUS_Y 55       /* status band: 55..63 */
 
 static int s_timed_out = 0;   /* last run ended on its own 3-min timeout */
 static deauth_mode_t s_sel = DEAUTH_MODE_DEAUTH; /* attack list cursor */
-static deauth_mode_t s_last = DEAUTH_MODE_DEAUTH; /* mode that last ran */
 
 static void draw_msg(const char *l1, const char *l2) {
     oled_fb_t *fb = hal_oled_fb();
@@ -45,7 +44,7 @@ static void draw(void) {
         snprintf(t, sizeof(t), ">%.27s", ssid[0] ? ssid : "<hidden>");
         t[32] = 0;
         int tw = oled_text_w(&oled_font, t);
-        oled_text(fb, &oled_font, (OLED_W - tw) / 2, 10, t, 1);
+        oled_text(fb, &oled_font, (OLED_W - tw) / 2, 9, t, 1);
     }
     /* Attack list (UP/DOWN navigates, OK runs the selected one). */
     for (int i = 0; i < DEAUTH_MODE_COUNT; i++) {
@@ -141,7 +140,6 @@ int ui_wifiatk_key(hacku_key_t k) {
             s_timed_out = 0;
         } else {
             s_timed_out = 0;
-            s_last = s_sel;
             svc_ble_stop();  /* deauth family is WiFi-only */
             int r = svc_deauth_start(s_sel);
             if (r < 0) {
@@ -151,13 +149,12 @@ int ui_wifiatk_key(hacku_key_t k) {
                     r == -3 ? "channel failed" :
                     r == -4 ? "wifi restart failed" :
                     r == -6 ? "IDF rejects mgmt" : "start failed";
-                draw_msg("deauth failed", e);
+                draw_msg("attack failed", e);
                 vTaskDelay(pdMS_TO_TICKS(1500));
             }
         }
         draw();
     }
-    (void)s_last;
     return 0;
 }
 

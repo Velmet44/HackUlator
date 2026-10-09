@@ -12,11 +12,14 @@
 /* Attack modes. 0xC = deauth (works pre-auth), 0xA = disassociation
  * (only meaningful to an already-associated client). Combined sends both
  * every tick, which catches stacks that honour one and ignore the other.
- * Frame layouts follow Hydra-ESP's wsl_bypasser templates. */
+ * Beacon spam broadcasts fake AP beacons with random SSIDs/BSSIDs (clutter
+ * for nearby scanners). Frame layouts follow Hydra-ESP's wsl_bypasser
+ * templates. */
 typedef enum {
     DEAUTH_MODE_DEAUTH = 0,   /* 0xC only, reason 0x02 */
     DEAUTH_MODE_DISASSOC = 1, /* 0xA only, reason 0x01 */
     DEAUTH_MODE_COMBINED = 2, /* 0xC + 0xA per tick */
+    DEAUTH_MODE_BEACON = 3,   /* 0x80 beacon per tick, random SSID/BSSID */
     DEAUTH_MODE_COUNT
 } deauth_mode_t;
 

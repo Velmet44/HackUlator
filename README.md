@@ -17,6 +17,7 @@ Target: classic **ESP32-WROOM**, 0.96" **SSD1306 128x64 OLED** (I2C), 6 buttons.
   1. **Deauth** — subtype `0xC`, reason 2. Works pre-authentication.
   2. **Disassoc** — subtype `0xA`, reason 1. Only meaningful to an already-associated client.
   3. **Deauth+Disassoc** — both frames every tick, catching stacks that honour one and ignore the other.
+  4. **Beacon spam** — broadcast fake AP beacons (random BSSID + random 1–10 char SSID, ESS+privacy caps) once per tick, so nearby scanners and clients see a stream of invented networks. No session target required; runs on channel 1 unless a target's channel is set.
   Live status shows the mode, frames/sec and time remaining. Works on **stock ESP-IDF** via a WSL bypass (`wsl_bypasser.*`: overrides the driver's private frame-type gate + `-Wl,-zmuldefs`), because stock `esp_wifi_80211_tx()` rejects management frames.
 - Entry guards: choosing an attack with no target — or a target that has vanished — shows a message and redirects to the scan page
 - One radio at a time (WiFi torn down before BLE and vice versa); full teardown on lock (stealth + power)
@@ -108,6 +109,8 @@ AGENTS.md        repo conventions, build commands, hard constraints
 **No logs while the caster runs.** The caster mirror is always on and silences the log bus (log bytes would corrupt the PKC rect stream), so the device looks silent on a 115200 monitor by design. Only early boot logs (before the caster starts) are visible. Use the viewer or on-OLED diagnostics.
 
 **Deauth is 2.4 GHz only.** The ESP32 cannot touch 5 GHz, so a client on `SSID-5G` is unaffected even while the flood runs. Target the 2.4 GHz SSID and confirm the client is on that band.
+
+**Beacon spam is clutter, not capture.** It broadcasts invented beacons so scanners list phantom networks and some clients may try to connect — but it cannot hand you credentials: a fake AP is only useful if the victim also enters a password, and even then it goes to your capture, not the real network. It floods the whole channel, so every nearby device sees the bogus SSIDs too.
 
 **Deauth floods everything on the channel.** The frames are broadcast, so unrelated devices on the same channel (including neighbours') will also be dropped. Keep runs short and test away from others.
 
