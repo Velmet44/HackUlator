@@ -111,6 +111,7 @@ static void gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p) {
             fill_opt(&s_out[i], p);
             if (p->scan_rst.rssi > s_out[i].rssi)
                 s_out[i].rssi = p->scan_rst.rssi;
+            s_out[i].adv++;   /* activity sample for the detail view */
             return;
         }
     }
@@ -126,6 +127,7 @@ static void gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p) {
     s_out[s_n].addr_type = p->scan_rst.ble_addr_type;
     s_out[s_n].evt_type = p->scan_rst.ble_evt_type;
     s_out[s_n].rssi = p->scan_rst.rssi;
+    s_out[s_n].adv = 1;
     s_n++;
 }
 

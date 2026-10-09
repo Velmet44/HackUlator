@@ -60,6 +60,11 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   for "traffic appeared / disappeared", never a completeness claim.
   `svc_sniff_set_channel()` (UP/DOWN) resets the counters per hop so a rate
   always describes one band.
+* **`ui_wifiscan_run()` blocks ~2.5 s longer than it used to.** After the
+  scan it runs `svc_sniff_burst()` on the strongest AP's channel. Headless
+  tests that wait a fixed time for the scan list must allow for that, and
+  the burst channel comes from `s_aps[0].channel` — never a hardcoded 1,
+  which silently sampled an empty band whenever the loop body never ran.
 * **802.11 field layout, two traps.** In the FC byte, TYPE is bits 2-3 and
   SUBTYPE is bits **4-7** — a beacon is `fc0 & 0x0C == 0` **and**
   `(fc0 >> 4) & 0x0F == 8`. Masking the low nibble matches `0x88` (QoS-Data)
@@ -83,6 +88,9 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
 * `svc_resume.c` — persists a pending scan across `esp_restart()` (RTC
   NOINIT) for the low-heap reboot path.
 * `svc_sniff.*` — passive promiscuous RX (count only, see hard constraints).
+  Also `svc_sniff_burst()`: a short blocking listen used by the WiFi scan
+  detail view to sample one channel's activity. It takes over the
+  promiscuous callback itself, so the live monitor must not be running.
   `ui_sniff.*` — the RX monitor screen, reached through `ui_wifipassive.*`
   (the "WiFi passive" submenu — deliberately its own widget, not a nested
   `ui_menu_enter()`, whose single module-level cursor the submenu would

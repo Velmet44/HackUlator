@@ -73,6 +73,34 @@ int svc_sniff_channel(void);
  * 0 ok, <0 refused (out of range, or the driver rejected it). */
 int svc_sniff_set_channel(int ch);
 
+/* ---- listen burst ----
+ * A short blocking listen on one channel, used to sample a scanned
+ * network's activity. Unlike the live monitor this is deliberately a
+ * SAMPLE: it answers "how busy was this band for 2.5 s", not the same
+ * thing as a continuous count.
+ *
+ * Must not be called while svc_sniff_running() - it takes over the
+ * promiscuous callback itself. */
+#define SNIFF_AP_TRACK 8
+typedef struct {
+    uint8_t  bssid[6];
+    uint32_t frames;   /* all frames seen from this BSSID */
+    uint32_t beacons;  /* subset of `frames` that were beacons */
+    int      rssi;     /* strongest seen, negative dBm */
+} sniff_ap_t;
+
+typedef struct {
+    int      channel;
+    uint32_t total, mgmt, data;
+    int      elapsed_ms;
+    int      n;                  /* valid entries in ap[] */
+    sniff_ap_t ap[SNIFF_AP_TRACK];
+} sniff_burst_t;
+
+/* Listen on `channel` for `ms`, then stop. Fills *out (zeroed first).
+ * Returns the total frame count, or <0 on failure. */
+int svc_sniff_burst(int channel, int ms, sniff_burst_t *out);
+
 /* Frame counters are bumped from the WiFi-task callback, so a 32-bit load is
  * not atomic on ESP32. Read through these helpers. */
 uint32_t svc_sniff_poll_total(void);

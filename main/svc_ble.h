@@ -21,6 +21,7 @@ typedef struct {
     uint8_t has_svc;
     uint16_t mfr;   /* manufacturer company id, valid if has_mfr */
     uint8_t has_mfr;
+    uint32_t adv;   /* advert events seen from this MAC during the scan */
 } ble_dev_t;
 
 /* Blocking GAP scan (about `seconds`). Returns dev count, or negative

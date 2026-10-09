@@ -5,6 +5,7 @@
 #include "oled_gfx.h"
 #include "font_oled.h"
 #include "svc_wifi.h"
+#include "svc_sniff.h"
 #include "esp_wifi_types.h"
 #include "esp_heap_caps.h"
 #include "svc_resume.h"
@@ -28,7 +29,25 @@ static int s_page = 0;   /* detail field page */
 #define ROW_PX 11
 #define LIST_Y0 12
 #define FIELDS_PER_PAGE 4
-#define WIFI_NFIELDS 10
+#define WIFI_NFIELDS 12
+/* Post-scan listen sample. Only the strongest AP's channel is measured -
+ * one burst keeps the scan quick, and most networks cluster on 1/6/11.
+ * APs on other channels report "not sampled" rather than a wrong number. */
+#define BURST_MS 2500
+static sniff_burst_t s_burst;
+static int s_burst_ok;
+
+static const sniff_ap_t *burst_find(const uint8_t *bssid) {
+    if (!s_burst_ok) {
+        return NULL;
+    }
+    for (int i = 0; i < s_burst.n && i < SNIFF_AP_TRACK; i++) {
+        if (memcmp(s_burst.ap[i].bssid, bssid, 6) == 0) {
+            return &s_burst.ap[i];
+        }
+    }
+    return NULL;
+}
 
 static const char *auth_label(int a) {
     switch (a) {
@@ -234,6 +253,37 @@ static void wifi_field(wifi_ap_t *ap, int i, char *out, size_t n) {
                      !ap->ftm_r && !ap->ftm_i ? "-" : "");
             snprintf(out, n, "FTM %s", ftm);
             break;
+        case 10: {
+            /* Activity sample: how busy this AP's channel was during the
+             * post-scan listen burst. Only one channel is sampled, so
+             * anything else says which channel was measured instead of
+             * printing a number that does not describe this network. */
+            if (!s_burst_ok) {
+                snprintf(out, n, "busy  sample failed");
+            } else if (ap->channel != s_burst.channel) {
+                snprintf(out, n, "busy  sampled ch%d only",
+                         s_burst.channel);
+            } else {
+                unsigned hz = s_burst.elapsed_ms > 0
+                    ? (unsigned)((uint64_t)s_burst.total * 1000u /
+                                 (uint32_t)s_burst.elapsed_ms) : 0u;
+                snprintf(out, n, "ch%d busy %u f/s", ap->channel,
+                         hz > 9999u ? 9999u : hz);
+            }
+            break;
+        }
+        case 11: {
+            const sniff_ap_t *sa = burst_find(ap->bssid);
+            if (!s_burst_ok || ap->channel != s_burst.channel || !sa) {
+                snprintf(out, n, "frames -");
+            } else {
+                snprintf(out, n, "heard %lu in %ds",
+                         (unsigned long)(sa->frames > 9999u
+                             ? 9999u : sa->frames),
+                         (int)(s_burst.elapsed_ms / 1000));
+            }
+            break;
+        }
         default:
             snprintf(cc, sizeof(cc), "%.2s", ap->country);
             if (cc[0] < ' ' || cc[1] < ' ') {
@@ -335,6 +385,7 @@ int ui_wifiscan_run(void) {
         }
     }
     s_count = svc_wifi_scan(s_aps, WIFI_MAX_AP);
+    s_burst_ok = 0;
     s_top = 0;
     s_sel = 0;
     s_detail = 0;
@@ -352,11 +403,26 @@ int ui_wifiscan_run(void) {
         return -1;
     }
     resume_mark_ok();
+    /* Sample activity on the strongest AP's channel so the detail view can
+     * report real traffic rather than guessing from a beacon count. */
+    if (s_count > 0) {
+        int ch = s_aps[0].channel;   /* the strongest, since the list is RSSI-sorted */
+        int best = s_aps[0].rssi;
+        for (int i = 1; i < s_count; i++) {
+            if (s_aps[i].rssi > best) {
+                best = s_aps[i].rssi;
+                ch = s_aps[i].channel;
+            }
+        }
+        draw_msg("sampling band", "");
+        s_burst_ok = svc_sniff_burst(ch, BURST_MS, &s_burst) >= 0;
+    }
     draw_list();
     return s_count;
 }
 
 void ui_wifiscan_drop(void) {
+    s_burst_ok = 0;
     if (s_aps) {
         free(s_aps);
         s_aps = NULL;

@@ -10,8 +10,8 @@ Target: classic **ESP32-WROOM**, 0.96" **SSD1306 128x64 OLED** (I2C), 6 buttons.
 
 - Working calculator disguise (shunting-yard evaluator, `C ( ) / 7 8 9 * 4 5 6 - 1 2 3 + 0 . < =`)
 - Unlock with `4+6=`, relock with OK+BACK hold (2 s), 3x BACK, or 5-min idle
-- **WiFi scan**: sorted by RSSI; detail shows MAC / RSSI / channel / auth / ciphers / PHY / WPS / FTM / country
-- **BLE scan** (~5 s): deduped by MAC; detail shows name / MAC / RSSI / addr type / adv type / TX / flags / service UUID / manufacturer
+- **WiFi scan**: sorted by RSSI; detail shows MAC / RSSI / channel / auth / ciphers / PHY / WPS / FTM / country, plus a **2.5 s activity sample** — how busy the AP's channel was (frames/s) and how many frames came from that BSSID. The sample covers only the strongest AP's channel; networks on other channels report `not sampled` rather than a wrong number
+- **BLE scan** (~5 s): deduped by MAC; detail shows name / MAC / RSSI / addr type / adv type / TX / flags / service UUID / manufacturer / **advert count** for the scan window. Advert rate is *not* a load figure — a phone and a fitness tracker advertise at similar rates whether idle or streaming — so no invented "busy %" is shown
 - **Session attack targets**: pick a target from any scan detail view with RIGHT (footer flips to `selected`); stored in RAM only, cleared on reboot. Separate slots for WiFi (keyed by BSSID) and BLE (keyed by MAC).
 - **WiFi attacks** (UP/DOWN selects, OK runs, 100 ms cadence, 3-minute auto-stop):
   1. **Deauth** — subtype `0xC`, reason 2. Works pre-authentication.
@@ -89,6 +89,7 @@ All Python tools accept `--port` (auto-detected if omitted) and work on Windows 
 | `hk_test.py` | Headless end-to-end verifier (calculator, unlock, scans, relock) |
 | `hk_test_deauth.py` | Deauth flow verifier (target select → run → counter → stop) |
 | `hk_test_rx.py` | Passive verifiers (menu scroll → submenus → RX monitor → BACK → BLE adv monitor) |
+| `hk_activity.py` | Walk both scan detail views to the new activity fields |
 | `hk_validate_rx.py` | Counter-accuracy harness: scan for reference APs, hop to a channel, screenshot the self-check panel |
 | `hk_log.py` | Capture one boot log over UART0 @ 115200 |
 | `hk_wire.py` | Drive the UI and report which caster rects hit the wire |
@@ -131,6 +132,8 @@ AGENTS.md        repo conventions, build commands, hard constraints
 Measured on a strong local AP (−25 dBm, 1 AP on ch6, 100 TU interval): **~86% of beacons captured.** That is good enough for the monitor's purpose — spotting a busy channel and watching traffic rise or fall — but it is not 100%, and **data-frame counts are the weakest number**: `CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=y` aggregates them into bursts that a six-buffer pool sheds. Expect data rates to be understated by more than management rates.
 
 **Passive is not invisible.** "Passive" here means the device does not transmit: no injected frames, no `SCAN_REQ`, no probe responses, no association. It is not anonymity — the ESP32 still radiates its own management frames, and the passive BLE scan uses a random address that changes per session but is still a radio that is visibly present. Do not rely on these modes to avoid detection.
+
+**Scan activity is a sample, not a census.** The WiFi detail view reports a 2.5 s listen burst on the strongest AP's channel only. Networks on other channels read `sampled chN only` rather than a number that would not describe them. And unlike the RX monitor — continuous but lossy — a scan sample is brief but unbiased, so it can miss traffic that bursts outside its window.
 
 **Deauth is 2.4 GHz only.** The ESP32 cannot touch 5 GHz, so a client on `SSID-5G` is unaffected even while the flood runs. Target the 2.4 GHz SSID and confirm the client is on that band.
 

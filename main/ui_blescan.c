@@ -31,7 +31,7 @@ static int s_page = 0;
 #define LIST_Y0 12
 #define SCAN_SECS 5
 #define FIELDS_PER_PAGE 4
-#define BLE_NFIELDS 9
+#define BLE_NFIELDS 10
 
 static const char *addr_label(int a) {
     switch (a) {
@@ -191,6 +191,15 @@ static void ble_field(ble_dev_t *dv, int i, char *out, size_t n) {
                 snprintf(svc, sizeof(svc), "-");
             }
             snprintf(out, n, "SVC %s", svc);
+            break;
+        case 8:
+            /* Advert events seen during the scan window. This is a count
+             * of how OFTEN a device announces itself - NOT a load figure.
+             * A phone and a fitness tracker advertise at similar rates
+             * whether idle or streaming, so there is no honest "busy %"
+             * to show here. */
+            snprintf(out, n, "adv %lu in 5s",
+                     (unsigned long)(dv->adv > 99999UL ? 99999UL : dv->adv));
             break;
         default:
             if (dv->has_mfr) {

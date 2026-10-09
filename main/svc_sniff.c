@@ -4,6 +4,8 @@
 #include "esp_wifi_types.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <string.h>
 
 static const char *TAG = "svc_sniff";
@@ -36,11 +38,16 @@ static int64_t s_win_us;
 typedef struct {
     uint8_t  bssid[6];
     uint16_t interval_tu; /* 102.4 us units; 100 TU = ~9.77 beacons/s */
-    uint32_t count;
+    uint32_t count;       /* beacons from this BSSID */
+    uint32_t frames;      /* ALL frames from this BSSID (burst mode only) */
+    int      rssi;
 } beacon_seen_t;
 
 static beacon_seen_t s_bseen[BEACON_TRACK_MAX];
 static int s_bseen_n;
+/* While a burst is running the tracker also counts non-beacon frames per
+ * BSSID. The live monitor leaves this off so the hot path stays minimal. */
+static int s_burst;
 static volatile uint32_t s_beacon_count;
 static volatile uint32_t s_beacon_win;
 static volatile uint32_t s_beacon_rate;
@@ -119,6 +126,27 @@ static void IRAM_ATTR rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         }
         if (slot >= 0) {
             s_bseen[slot].count++;
+        }
+    } else if (s_burst && p->rx_ctrl.sig_len >= 24) {
+        /* Burst mode attributes EVERY frame to a BSSID so a scan's detail
+         * view can say how busy each network was. addr3 (offset 16) is the
+         * BSSID for data frames and most management frames alike. */
+        const uint8_t *bs = p->payload + 16;
+        int slot = -1;
+        for (int i = 0; i < s_bseen_n; i++) {
+            if (memcmp(s_bseen[i].bssid, bs, 6) == 0) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0 && s_bseen_n < BEACON_TRACK_MAX) {
+            slot = s_bseen_n++;
+            memset(&s_bseen[slot], 0, sizeof(s_bseen[slot]));
+            memcpy(s_bseen[slot].bssid, bs, 6);
+            s_bseen[slot].interval_tu = 100;
+        }
+        if (slot >= 0) {
+            s_bseen[slot].frames++;
         }
     }
 
@@ -335,6 +363,84 @@ int svc_sniff_beacon_aps(void) { return s_bseen_n; }
 uint32_t svc_sniff_beacons(void) { return s_beacon_count; }
 
 uint32_t svc_sniff_beacon_rate(void) { return s_beacon_rate; }
+
+/* Short blocking listen on one channel, used by the scan detail views to
+ * sample how busy a band actually is. Reuses the same promiscuous callback;
+ * the live monitor must not be running when this is called. */
+int svc_sniff_burst(int channel, int ms, sniff_burst_t *out) {
+    if (!out || ms <= 0) {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    if (channel < 1 || channel > 13) {
+        channel = 1;
+    }
+    out->channel = channel;
+
+    if (svc_sniff_running()) {
+        svc_sniff_stop();
+    }
+    if (svc_wifi_init() != 0) {
+        return -1;
+    }
+    if (esp_wifi_set_channel((uint8_t)channel, WIFI_SECOND_CHAN_NONE) != ESP_OK) {
+        return -3;
+    }
+
+    s_total = 0;
+    s_mgmt = 0;
+    s_data = 0;
+    s_bseen_n = 0;
+    memset(s_bseen, 0, sizeof(s_bseen));
+    s_burst = 1;
+
+    wifi_promiscuous_filter_t f = {
+        .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA,
+    };
+    if (esp_wifi_set_promiscuous(true) != ESP_OK) {
+        s_burst = 0;
+        return -2;
+    }
+    esp_wifi_set_promiscuous_filter(&f);
+    esp_wifi_set_promiscuous_rx_cb(rx_cb);
+
+    /* Let the radio settle on the channel before the window opens. */
+    vTaskDelay(pdMS_TO_TICKS(120));
+
+    int64_t start = esp_timer_get_time();
+    int64_t deadline = start + (int64_t)ms * 1000;
+    for (;;) {
+        int64_t now = esp_timer_get_time();
+        if (now >= deadline) {
+            break;
+        }
+        int64_t left = deadline - now;
+        vTaskDelay(pdMS_TO_TICKS(left > 50000 ? 50 : 10));
+    }
+
+    esp_wifi_set_promiscuous_rx_cb(NULL);
+    esp_wifi_set_promiscuous(false);
+    s_burst = 0;
+
+    out->total = s_total;
+    out->mgmt = s_mgmt;
+    out->data = s_data;
+    out->elapsed_ms = (int)((esp_timer_get_time() - start) / 1000);
+    out->n = s_bseen_n;
+    for (int i = 0; i < s_bseen_n && i < SNIFF_AP_TRACK; i++) {
+        out->ap[i].bssid[0] = s_bseen[i].bssid[0];
+        out->ap[i].bssid[1] = s_bseen[i].bssid[1];
+        out->ap[i].bssid[2] = s_bseen[i].bssid[2];
+        out->ap[i].bssid[3] = s_bseen[i].bssid[3];
+        out->ap[i].bssid[4] = s_bseen[i].bssid[4];
+        out->ap[i].bssid[5] = s_bseen[i].bssid[5];
+        out->ap[i].frames = s_bseen[i].frames + s_bseen[i].count;
+        out->ap[i].beacons = s_bseen[i].count;
+    }
+    ESP_LOGI(TAG, "burst ch%d %ums: %u frames, %u aps",
+             channel, out->elapsed_ms, (unsigned)out->total, out->n);
+    return (int)out->total;
+}
 
 uint16_t svc_sniff_beacon_interval(void) { return s_beacon_interval; }
 
