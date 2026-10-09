@@ -29,6 +29,9 @@ test_mem6/
 test_deauth/
 tools/probe_*.png
 
+# Third-party reference repos (read-only, cloned on demand for study)
+TEMP/
+
 # OS / editor
 .DS_Store
 Thumbs.db

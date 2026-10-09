@@ -12,6 +12,8 @@
 #include "svc_ble.h"
 #include "svc_deauth.h"
 #include "svc_resume.h"
+#include "svc_sniff.h"
+#include "ui_sniff.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
@@ -29,24 +31,29 @@ typedef enum {
     SCR_BLESCAN,
     SCR_WIFIATK,
     SCR_BLEATK,
+    SCR_SNIFF,
 } screen_t;
 
 static const char *MENU_ITEMS[] = {
-    "WiFi scan", "BLE scan", "WiFi attacks", "BLE attacks",
+    "WiFi scan", "BLE scan", "WiFi attacks", "BLE attacks", "RX monitor",
 };
-#define MENU_N 4
+#define MENU_N 5
 
 static int64_t s_last_atk_tick = 0; /* live-attack status repaint (ms) */
+static int64_t s_last_sniff_tick = 0; /* RX monitor counter repaint (ms) */
 
 static void show_menu(void) {
     ui_menu_enter("HACKULATOR", MENU_ITEMS, MENU_N);
 }
 
-/* Guard menu selection: drop the deauth TX timer before ANY radio teardown
- * or re-verify, then guard the whole selection+transition. */
+/* Guard menu selection: drop the deauth TX timer AND the promiscuous RX
+ * callback before ANY radio teardown or re-verify, then guard the whole
+ * selection+transition. A live promiscuous callback pointing into a
+ * deinitialised driver faults, exactly like an orphan TX timer. */
 static int enter_menu_item(int sel, screen_t *screen_out) {
     if (sel == 0) {                       /* WiFi scan */
         svc_deauth_stop();
+        svc_sniff_stop();
         svc_ble_stop();
         *screen_out = SCR_WIFISCAN;
         ui_wifiscan_run();
@@ -54,12 +61,14 @@ static int enter_menu_item(int sel, screen_t *screen_out) {
     }
     if (sel == 1) {                       /* BLE scan (stops WiFi itself) */
         svc_deauth_stop();
+        svc_sniff_stop();
         *screen_out = SCR_BLESCAN;
         ui_blescan_run();
         return 1;
     }
     if (sel == 2) {                       /* WiFi attacks */
         svc_deauth_stop();
+        svc_sniff_stop();
         svc_ble_stop();
         svc_wifi_teardown();              /* attacks start radio-cold */
         /* Enter the screen unconditionally: target verification happens
@@ -71,10 +80,20 @@ static int enter_menu_item(int sel, screen_t *screen_out) {
     }
     if (sel == 3) {                       /* BLE attacks */
         svc_deauth_stop();
+        svc_sniff_stop();
         svc_ble_stop();
         svc_wifi_teardown();
         *screen_out = SCR_BLEATK;
         ui_bleatk_run();
+        return 1;
+    }
+    if (sel == 4) {                       /* passive RX monitor */
+        svc_deauth_stop();
+        svc_ble_stop();
+        /* Radio stays up: promiscuous RX shares the STA path, so no
+         * teardown here - that is the whole point of a passive monitor. */
+        *screen_out = SCR_SNIFF;
+        ui_sniff_run();
         return 1;
     }
     return 0;
@@ -138,6 +157,7 @@ void app_main(void) {
                     unlocked = 0;
                     screen = SCR_CALC;
                     svc_deauth_stop(); /* TX timer must die before radio */
+                    svc_sniff_stop();  /* RX callback must die before radio */
                     svc_wifi_teardown(); /* radios off + heap freed */
                     svc_ble_stop();
                     ui_wifiscan_drop(); /* free scan lists so the next
@@ -192,6 +212,11 @@ void app_main(void) {
                     screen = SCR_MENU;
                     show_menu();
                 }
+            } else if (screen == SCR_SNIFF) {
+                if (ui_sniff_key(k) == SNIFF_EXIT_MENU) {
+                    screen = SCR_MENU;
+                    show_menu();
+                }
             }
         }
         hal_oled_caster_poll(); /* skipped-frame catch-up + self-heal */
@@ -204,11 +229,20 @@ void app_main(void) {
                 ui_bleatk_tick();
             }
         }
+        /* Live counters for the passive RX monitor (paced, cheap). */
+        if (screen == SCR_SNIFF) {
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            if (now_ms - s_last_sniff_tick >= 500) {
+                s_last_sniff_tick = now_ms;
+                ui_sniff_tick();
+            }
+        }
         if (unlocked &&
             esp_timer_get_time() - last_activity > (int64_t)IDLE_RELOCK_MS * 1000) {
             unlocked = 0;
             screen = SCR_CALC;
             svc_deauth_stop();
+            svc_sniff_stop();
             svc_wifi_teardown();
             svc_ble_stop();
             ui_wifiscan_drop();

@@ -12,14 +12,16 @@ static const char * const *s_items;
 static int s_n, s_sel;
 
 #define ROW_H 9
-#define LIST_Y0 12
+/* Five items at 10,19,28,37,46: the last row ends at y=54 and the footer
+ * starts at y=55. Do not raise LIST_Y0 without re-checking that fit. */
+#define LIST_Y0 10
 
 static void draw(void) {
     oled_fb_t *fb = hal_oled_fb();
     oled_clear(fb, 0);
     int tw = oled_text_w(&oled_font, s_title);
     oled_text(fb, &oled_font, (OLED_W - tw) / 2, 0, s_title, 1);
-    oled_hline(fb, 0, 10, OLED_W, 1);
+    oled_hline(fb, 0, 9, OLED_W, 1);
     for (int i = 0; i < s_n; i++) {
         int y = LIST_Y0 + i * ROW_H;
         char buf[32];

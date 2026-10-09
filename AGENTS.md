@@ -47,8 +47,18 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   not delete itself from its own callback), the tick calls
   `svc_deauth_stop()`. Timeout is `DEAUTH_TIMEOUT_S` (180 s).
   `main.c:enter_menu_item()` owns every menu transition and MUST call
-  `svc_deauth_stop()` before any radio teardown (an orphan TX timer breaks
-  the next verify scan).
+  `svc_deauth_stop()` and `svc_sniff_stop()` before any radio teardown (an
+  orphan TX timer breaks the next verify scan; a live promiscuous callback
+  faults on a deinitialised driver). The relock and idle paths in
+  `app_main()` must do the same.
+* **RX callback is count-only.** `svc_sniff.c`'s `rx_cb` runs on the WiFi
+  task and holds one of only `CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM` (6) RX
+  buffers per frame. Never malloc, queue, or copy a payload there, and never
+  call `ESP_LOG*` (it stalls the WiFi task). The IDF driver exposes no
+  RX-drop counter, so the displayed rate is a **relative** figure — enough
+  for "traffic appeared / disappeared", never a completeness claim.
+  `ui_menu.c` `LIST_Y0` is capped by this: 5 items at ROW_H 9 must end by
+  y=54 to clear the footer at y=55.
 * `ui_status.*` — bottom bar `"34K W:abc B:def"` (free KB + targets).
   Calculator has no bar (disguise); detail views keep action footers.
 * `svc_wifi.c` / `svc_ble.c` — lazy radio bring-up, full teardown on stop.
@@ -56,6 +66,8 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   attack targets: WiFi keyed by BSSID, BLE by MAC, `tgt_*_verify()` rescans.
 * `svc_resume.c` — persists a pending scan across `esp_restart()` (RTC
   NOINIT) for the low-heap reboot path.
+* `svc_sniff.*` — passive promiscuous RX (count only, see hard constraints).
+  `ui_sniff.*` — the "RX monitor" screen.
 * `hal_oled.*` (1KB static mono page FB, SSD1306+caster flush),
   `hal_input.*`
   (6 buttons + caster keys, `KEY_RELOCK` on OK+BACK hold / 3x BACK),
