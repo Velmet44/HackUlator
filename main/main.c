@@ -10,6 +10,7 @@
 #include "ui_bleatk.h"
 #include "svc_wifi.h"
 #include "svc_ble.h"
+#include "svc_deauth.h"
 #include "svc_resume.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -35,8 +36,56 @@ static const char *MENU_ITEMS[] = {
 };
 #define MENU_N 4
 
+static int64_t s_last_atk_tick = 0; /* live-attack status repaint (ms) */
+
 static void show_menu(void) {
     ui_menu_enter("HACKULATOR", MENU_ITEMS, MENU_N);
+}
+
+/* Guard menu selection: drop the deauth TX timer before ANY radio teardown
+ * or re-verify, then guard the whole selection+transition. */
+static int enter_menu_item(int sel, screen_t *screen_out) {
+    if (sel == 0) {                       /* WiFi scan */
+        svc_deauth_stop();
+        svc_ble_stop();
+        *screen_out = SCR_WIFISCAN;
+        ui_wifiscan_run();
+        return 1;
+    }
+    if (sel == 1) {                       /* BLE scan (stops WiFi itself) */
+        svc_deauth_stop();
+        *screen_out = SCR_BLESCAN;
+        ui_blescan_run();
+        return 1;
+    }
+    if (sel == 2) {                       /* WiFi attacks */
+        svc_deauth_stop();
+        svc_ble_stop();
+        svc_wifi_teardown();              /* attacks start radio-cold */
+        if (ui_wifiatk_require()) {
+            *screen_out = SCR_WIFIATK;
+            ui_wifiatk_run();
+        } else {
+            /* nothing selected / target gone: scan page */
+            *screen_out = SCR_WIFISCAN;
+            ui_wifiscan_run();
+        }
+        return 1;
+    }
+    if (sel == 3) {                       /* BLE attacks */
+        svc_deauth_stop();
+        svc_ble_stop();
+        svc_wifi_teardown();
+        if (ui_bleatk_require()) {
+            *screen_out = SCR_BLEATK;
+            ui_bleatk_run();
+        } else {
+            *screen_out = SCR_BLESCAN;
+            ui_blescan_run();
+        }
+        return 1;
+    }
+    return 0;
 }
 
 void app_main(void) {
@@ -97,6 +146,7 @@ void app_main(void) {
                 if (unlocked) {
                     unlocked = 0;
                     screen = SCR_CALC;
+                    svc_deauth_stop(); /* TX timer must die before radio */
                     svc_wifi_teardown(); /* radios off + heap freed */
                     svc_ble_stop();
                     ui_wifiscan_drop(); /* free scan lists so the next
@@ -115,36 +165,11 @@ void app_main(void) {
                 continue;
             }
             if (screen == SCR_MENU) {
+                /* ui_menu_key returns MENU_BACK/-1 or an index; anything
+                 * that transitions must pass the deauth/radio guard. */
                 int sel = ui_menu_key(k);
-                if (sel == 0) {
-                    screen = SCR_WIFISCAN;
-                    svc_ble_stop();
-                    ui_wifiscan_run();
-                } else if (sel == 1) {
-                    screen = SCR_BLESCAN;
-                    ui_blescan_run(); /* stops WiFi internally */
-                } else if (sel == 2) {
-                    svc_ble_stop();
-                    svc_wifi_teardown(); /* attacks start radio-cold */
-                    if (!ui_wifiatk_require()) {
-                        /* nothing selected / target gone: scan page */
-                        screen = SCR_WIFISCAN;
-                        ui_wifiscan_run();
-                    } else {
-                        screen = SCR_WIFIATK;
-                        ui_wifiatk_run();
-                    }
-                } else if (sel == 3) {
-                    svc_ble_stop();
-                    svc_wifi_teardown();
-                    if (!ui_bleatk_require()) {
-                        screen = SCR_BLESCAN;
-                        ui_blescan_run();
-                    } else {
-                        screen = SCR_BLEATK;
-                        ui_bleatk_run();
-                    }
-                }
+                if (sel >= 0)
+                    enter_menu_item(sel, &screen);
                 /* BACK on the top menu does nothing (relock via gesture) */
             } else if (screen == SCR_WIFISCAN) {
                 if (ui_wifiscan_key(k)) {
@@ -169,10 +194,20 @@ void app_main(void) {
             }
         }
         hacku_display_caster_poll(); /* skipped-frame catch-up + self-heal */
+        /* Live status for a running attack (paced, cheap, TFT+caster). */
+        if (screen == SCR_WIFIATK || screen == SCR_BLEATK) {
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            if (now_ms - s_last_atk_tick >= 500) {
+                s_last_atk_tick = now_ms;
+                ui_wifiatk_tick();
+                ui_bleatk_tick();
+            }
+        }
         if (unlocked &&
             esp_timer_get_time() - last_activity > (int64_t)IDLE_RELOCK_MS * 1000) {
             unlocked = 0;
             screen = SCR_CALC;
+            svc_deauth_stop();
             svc_wifi_teardown();
             svc_ble_stop();
             ui_wifiscan_drop();

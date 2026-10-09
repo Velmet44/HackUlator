@@ -70,6 +70,9 @@ int ui_bleatk_key(hacku_key_t k) {
 /* Entry guard for anything needing the BLE target: 1 = target verified
  * present, run the attack. 0 = "nothing selected" or "target not found"
  * was shown, caller must redirect to the scan page. */
+/* No running BLE attack yet: nothing to repaint. */
+int ui_bleatk_tick(void) { return 0; }
+
 int ui_bleatk_require(void) {
     if (!tgt_ble_has()) {
         draw_msg("nothing selected", "opening scan...");

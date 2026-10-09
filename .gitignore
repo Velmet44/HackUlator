@@ -26,6 +26,7 @@ test_mem3/
 test_mem4/
 test_mem5/
 test_mem6/
+test_deauth/
 tools/probe_*.png
 
 # OS / editor

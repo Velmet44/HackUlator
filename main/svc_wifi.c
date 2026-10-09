@@ -2,6 +2,8 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "esp_err.h"
 #include <string.h>
 
 static const char *TAG = "svc_wifi";
@@ -66,12 +68,26 @@ int svc_wifi_scan(wifi_ap_t *out, int max) {
     if (n > (uint16_t)max)
         n = (uint16_t)max;
 
+    /* Cap the record array: the driver mallocs its own contiguous block
+     * internally, so a huge request here just fragments the heap. */
+    if (n > 8)
+        n = 8;
+    ESP_LOGI(TAG, "scan: %u aps, rec %u B, largest %u",
+             (unsigned)n, (unsigned)(sizeof(wifi_ap_record_t) * n),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     wifi_ap_record_t *rec = malloc(sizeof(wifi_ap_record_t) * n);
-    if (!rec)
+    if (!rec) {
+        ESP_LOGW(TAG, "rec malloc failed (%u B, largest %u)",
+                 (unsigned)(sizeof(wifi_ap_record_t) * n),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         return -5;
+    }
     uint16_t got = n;
     int rc = -1;
-    if (esp_wifi_scan_get_ap_records(&got, rec) == ESP_OK) {
+    esp_err_t err = esp_wifi_scan_get_ap_records(&got, rec);
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "get_ap_records failed: %s", esp_err_to_name(err));
+    if (err == ESP_OK) {
         for (int i = 0; i < got && i < max; i++) {
             size_t sl = strnlen((const char *)rec[i].ssid, 32);
             memcpy(out[i].ssid, rec[i].ssid, sl);

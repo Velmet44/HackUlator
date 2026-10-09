@@ -13,6 +13,7 @@ idf_component_register(SRCS "main.c"
                             "svc_wifi.c"
                             "svc_ble.c"
                             "svc_target.c"
+                            "svc_deauth.c"
                             "svc_resume.c"
                        INCLUDE_DIRS "."
                        PRIV_REQUIRES esp_wifi esp_event esp_netif nvs_flash

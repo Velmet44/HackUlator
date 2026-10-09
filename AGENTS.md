@@ -25,6 +25,11 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
 * `ui_menu.c` — top menu. `ui_wifiscan.*` / `ui_blescan.*` — scan + detail.
 * `ui_wifiatk.*` / `ui_bleatk.*` — attack screens + `ui_*_require()` entry
   guards (no target / target gone → caller must show scan page).
+  `svc_deauth.*` — WiFi deauth flood (100 ms esp_timer TX loop,
+  `esp_wifi_80211_tx`). `ui_wifiatk_tick()` repaints only the status band;
+  main loop calls it every 500 ms. `main.c:enter_menu_item()` owns every
+  menu transition and MUST call `svc_deauth_stop()` before any radio
+  teardown (an orphan TX timer breaks the next verify scan).
 * `ui_status.*` — bottom bar `"34K W:abc B:def"` (free KB + targets).
   Calculator has no bar (disguise); detail views keep action footers.
 * `svc_wifi.c` / `svc_ble.c` — lazy radio bring-up, full teardown on stop.
@@ -59,8 +64,14 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
 * `tools/hacku_viewer.py --port COMx` — live display viewer + remote keys
   (`wasd`/`e`/`b`). `tools/hk_test.py --port COMx [--cycles N]` —
   headless pass/fail incl. multi-cycle heap screenshots.
-* Test PNGs (`test_mem*`, `test_out`, `tools/probe_*`) are throwaway and
-  gitignored — never commit them.
+  `tools/hk_test_deauth.py` — deauth flow. `tools/hk_log.py` — boot log
+  over UART0 @ 115200 (**pointless on caster units**: logs are silenced so
+  they cannot corrupt the PKC stream). `tools/hk_wire.py`,
+  `tools/hk_px.py`, `tools/hk_anchor.py`, `tools/hk_palette.py` —
+  caster-wire and pixel probes. All accept `--port`, auto-detect if
+  omitted, and run on Windows/Linux/macOS.
+* Test PNGs (`test_mem*`, `test_out`, `test_deauth`, `tools/probe_*`) are
+  throwaway and gitignored — never commit them.
 
 ## Git
 

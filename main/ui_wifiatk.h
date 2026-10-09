@@ -10,5 +10,9 @@ void ui_wifiatk_run(void);
 /* Returns 1 when the user asks to leave (BACK), 0 otherwise. */
 int ui_wifiatk_key(hacku_key_t k);
 
+/* Repaint the live status line of a running attack (main-loop tick).
+ * 1 = repainted. */
+int ui_wifiatk_tick(void);
+
 /* Entry guard: 1 = target verified present, 0 = caller must show scan. */
 int ui_wifiatk_require(void);

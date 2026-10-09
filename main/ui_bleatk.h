@@ -12,3 +12,7 @@ int ui_bleatk_key(hacku_key_t k);
 
 /* Entry guard: 1 = target verified present, 0 = caller must show scan. */
 int ui_bleatk_require(void);
+
+/* Repaint the live status line of a running attack (main-loop tick).
+ * 1 = repainted. */
+int ui_bleatk_tick(void);
