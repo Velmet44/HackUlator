@@ -27,8 +27,9 @@ Target: classic **ESP32-WROOM**, 0.96" **SSD1306 128x64 OLED** (I2C), 6 buttons.
   The attacks screen shows live counters in the bottom band: frames TXed (`f…`) plus, for beacon spam, live fake APs and the chosen list (`f… a20 COMMON`).
   Live status shows the mode, frames/sec and time remaining. Works on **stock ESP-IDF** via a WSL bypass (`wsl_bypasser.*`: overrides the driver's private frame-type gate + `-Wl,-zmuldefs`), because stock `esp_wifi_80211_tx()` rejects management frames.
 - Entry guards: choosing an attack that needs a target when none is set — or one that has vanished — shows a message and redirects to the scan page. The check runs when the attack is **launched**, not when the attacks screen is opened, so self-targeting modes (beacon spam) never trigger a scan
-- **WiFi passive** → **RX monitor**: promiscuous mode, counts the 802.11 frames the chip overhears — live frames/sec, total, management vs data split, strongest RSSI. Joins nothing, sends nothing, needs no target. This is the half the scanner was missing: `WiFi scan` only samples beacons during an active scan and drops the traffic in between
-- **BLE passive**: counts BLE advertisements on a `BLE_SCAN_TYPE_PASSIVE` scan with a random own address, so it never answers a `SCAN_REQ` and the monitor itself is not identifiable. Ads/sec, total, strongest RSSI
+- **WiFi passive** → **RX monitor**: promiscuous mode, counts the 802.11 frames the chip overhears — live frames/sec, total, management vs data split, channel, strongest RSSI, APs heard. `UP`/`DOWN` hop the listener across channels 1-13 (counters reset per channel, so a rate always describes one band). Joins nothing, sends nothing, needs no target
+- **BLE passive** → **Adv monitor**: counts BLE advertisements on a `BLE_SCAN_TYPE_PASSIVE` scan with a random own address, so it never answers a `SCAN_REQ` and the monitor itself is not identifiable. Ads/sec, total, strongest RSSI
+- **Self-check** (`OK` on the RX monitor): the device validates its own counters. Beacons advertise their own transmit interval, so the expected rate follows from the air — no second receiver needed. Shows observed vs expected beacons/sec and the capture percentage. Compare *beacons to beacons*, never management frames to beacons
 - Both passive screens are listen-only and hold no records — no pcap, no handshake capture, no probe harvesting
 - One radio at a time (WiFi torn down before BLE and vice versa); full teardown on lock (stealth + power)
 - SSD1306 probe at boot (I2C 0x3C/0x3D); without an OLED the device still runs caster-only
@@ -87,7 +88,8 @@ All Python tools accept `--port` (auto-detected if omitted) and work on Windows 
 | `hacku_viewer.py` | Live display viewer (Tkinter + Pillow), remote key injection |
 | `hk_test.py` | Headless end-to-end verifier (calculator, unlock, scans, relock) |
 | `hk_test_deauth.py` | Deauth flow verifier (target select → run → counter → stop) |
-| `hk_test_rx.py` | Passive verifiers (menu scroll → WiFi passive submenu → RX monitor → BACK → BLE passive) |
+| `hk_test_rx.py` | Passive verifiers (menu scroll → submenus → RX monitor → BACK → BLE adv monitor) |
+| `hk_validate_rx.py` | Counter-accuracy harness: scan for reference APs, hop to a channel, screenshot the self-check panel |
 | `hk_log.py` | Capture one boot log over UART0 @ 115200 |
 | `hk_wire.py` | Drive the UI and report which caster rects hit the wire |
 | `hk_px.py` / `hk_anchor.py` / `hk_palette.py` | Framebuffer pixel inspection / colour anchors / palette dump |
@@ -120,7 +122,13 @@ AGENTS.md        repo conventions, build commands, hard constraints
 
 **No logs while the caster runs.** The caster mirror is always on and silences the log bus (log bytes would corrupt the PKC rect stream), so the device looks silent on a 115200 monitor by design. Only early boot logs (before the caster starts) are visible. Use the viewer or on-OLED diagnostics.
 
-**Passive counts are relative, not absolute.** The WiFi promiscuous callback in `svc_sniff.c` is deliberately count-only — it holds one of just six static RX buffers per frame, so queuing payloads is not an option, and the ESP-IDF driver gives no RX-drop counter. The BLE counter has the same caveat. Both are enough to see traffic or adverts appear and disappear, but neither is a claim about how much was captured. Against a completely idle network the WiFi rate reads 0 from the start; in a room with no BLE devices nearby the BLE screen reads 0 the whole time.
+**Passive counts are relative, not absolute.** The WiFi promiscuous callback in `svc_sniff.c` is deliberately count-only — it holds one of just six static RX buffers per frame, so queuing payloads is not an option, and the ESP-IDF driver gives no RX-drop counter. The BLE counter has the same caveat. Both are enough to see traffic or adverts appear and disappear, but neither is a claim about how much was captured.
+
+**The RX monitor starts on channel 1, which is usually empty.** Before any scan the radio sits on the ESP32 default, so the first reading is normally near zero — a correct count of nothing. Use `UP`/`DOWN` to hop onto a band with traffic. Press `OK` for the self-check panel; "no beacons on this ch" tells you the same thing more clearly.
+
+**Validating the counters without a second receiver.** A beacon states its own beacon interval, so the air itself is the reference: an AP advertising 100 TU must be heard ~9.8 times a second (a 802.11 time unit is 1024 µs). The self-check panel sums that expectation across the APs it heard and shows the capture ratio. Run it on a busy channel before trusting a rate.
+
+Measured on a strong local AP (−25 dBm, 1 AP on ch6, 100 TU interval): **~86% of beacons captured.** That is good enough for the monitor's purpose — spotting a busy channel and watching traffic rise or fall — but it is not 100%, and **data-frame counts are the weakest number**: `CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=y` aggregates them into bursts that a six-buffer pool sheds. Expect data rates to be understated by more than management rates.
 
 **Passive is not invisible.** "Passive" here means the device does not transmit: no injected frames, no `SCAN_REQ`, no probe responses, no association. It is not anonymity — the ESP32 still radiates its own management frames, and the passive BLE scan uses a random address that changes per session but is still a radio that is visibly present. Do not rely on these modes to avoid detection.
 

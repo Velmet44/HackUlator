@@ -63,6 +63,29 @@ int svc_sniff_have_rssi(void);
 /* Channel the monitor is parked on. */
 int svc_sniff_channel(void);
 
+/* Park the listener on a specific channel (1..13) and reset the counters, so
+ * a displayed rate always belongs to exactly one channel.
+ *
+ * Why this exists: at start-up the radio sits on the ESP32 default of
+ * channel 1, which in most environments is EMPTY. A monitor counting an
+ * empty channel reads near zero and looks broken. That is a correct count
+ * of nothing. Hop to a channel with traffic before trusting the rate.
+ * 0 ok, <0 refused (out of range, or the driver rejected it). */
+int svc_sniff_set_channel(int ch);
+
 /* Frame counters are bumped from the WiFi-task callback, so a 32-bit load is
  * not atomic on ESP32. Read through these helpers. */
 uint32_t svc_sniff_poll_total(void);
+
+/* ---- beacon self-check ----
+ * A beacon states its own beacon interval, so the air itself is the
+ * reference: an AP that advertises 100 TU must be heard ~9.8 times a
+ * second. Counting those beacons gives an EXPECTED rate with no second
+ * receiver, and comparing it to the observed rate yields a capture ratio -
+ * the honest answer to "is my counter dropping frames?".
+ * Only 8 BSSIDs are tracked (96 bytes of .bss); no payload is retained. */
+int      svc_sniff_beacon_aps(void);      /* distinct BSSIDs heard beaconing */
+uint32_t svc_sniff_beacons(void);         /* total beacons counted */
+uint32_t svc_sniff_beacon_rate(void);     /* beacons in the last 1 s window */
+uint32_t svc_sniff_beacon_exp_hz_milli(void); /* expected beacons/s x1000 */
+uint16_t svc_sniff_beacon_interval(void); /* first-seen interval, in TU */

@@ -15,6 +15,7 @@
 #include "svc_sniff.h"
 #include "ui_sniff.h"
 #include "ui_blepassive.h"
+#include "ui_bleadv.h"
 #include "ui_wifipassive.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -36,6 +37,7 @@ typedef enum {
     SCR_WIFIPASSIVE,
     SCR_SNIFF,
     SCR_BLEPASSIVE,
+    SCR_BLEADV,
 } screen_t;
 
 static const char *MENU_ITEMS[] = {
@@ -103,11 +105,11 @@ static int enter_menu_item(int sel, screen_t *screen_out) {
         ui_wifipassive_run();
         return 1;
     }
-    if (sel == 5) {                       /* BLE passive monitor */
+    if (sel == 5) {                       /* BLE passive submenu */
         svc_deauth_stop();
         svc_sniff_stop();
+        svc_ble_passive_stop();
         svc_ble_stop();
-        /* ui_blepassive_run() tears WiFi down itself: BT needs the heap. */
         *screen_out = SCR_BLEPASSIVE;
         ui_blepassive_run();
         return 1;
@@ -247,9 +249,22 @@ void app_main(void) {
                     ui_wifipassive_run();
                 }
             } else if (screen == SCR_BLEPASSIVE) {
-                if (ui_blepassive_key(k) == BLEPASS_EXIT_MENU) {
+                int r = ui_blepassive_key(k);
+                if (r == BLEPASS_EXIT_MENU) {
                     screen = SCR_MENU;
                     show_menu();
+                } else if (r == BLEPASS_OPEN_ADV) {
+                    /* The only screen that actually brings Bluedroid up;
+                     * it tears WiFi down itself since BT needs the heap. */
+                    screen = SCR_BLEADV;
+                    ui_bleadv_run();
+                }
+            } else if (screen == SCR_BLEADV) {
+                /* BACK returns to the BLE passive submenu, mirroring the
+                 * WiFi side. */
+                if (ui_bleadv_key(k) == BLEADV_EXIT_MENU) {
+                    screen = SCR_BLEPASSIVE;
+                    ui_blepassive_run();
                 }
             }
         }
@@ -264,12 +279,12 @@ void app_main(void) {
             }
         }
         /* Live counters for the passive RX monitor (paced, cheap). */
-        if (screen == SCR_SNIFF || screen == SCR_BLEPASSIVE) {
+        if (screen == SCR_SNIFF || screen == SCR_BLEADV) {
             int64_t now_ms = esp_timer_get_time() / 1000;
             if (now_ms - s_last_sniff_tick >= 500) {
                 s_last_sniff_tick = now_ms;
                 ui_sniff_tick();
-                ui_blepassive_tick();
+                ui_bleadv_tick();
             }
         }
         if (unlocked &&

@@ -58,6 +58,19 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   call `ESP_LOG*` (it stalls the WiFi task). The IDF driver exposes no
   RX-drop counter, so the displayed rate is a **relative** figure — enough
   for "traffic appeared / disappeared", never a completeness claim.
+  `svc_sniff_set_channel()` (UP/DOWN) resets the counters per hop so a rate
+  always describes one band.
+* **802.11 field layout, two traps.** In the FC byte, TYPE is bits 2-3 and
+  SUBTYPE is bits **4-7** — a beacon is `fc0 & 0x0C == 0` **and**
+  `(fc0 >> 4) & 0x0F == 8`. Masking the low nibble matches `0x88` (QoS-Data)
+  and silently counts data frames as beacons. Second: RSSI is always
+  negative, so a "best seen" sentinel must start below any real reading
+  (`-128`), never at 0.
+* **The self-check compares beacons to beacons.** `svc_sniff.c` derives the
+  expected rate from the beacon interval the frame itself advertises, so no
+  second receiver is needed to check the counters. Never compare the
+  all-management rate against it — management traffic also contains probes,
+  auth and deauth, which inflates the ratio past any meaningful value.
   `ui_menu.c` `LIST_Y0` is capped by this: rows fill y=10..54, so
   `LIST_VISIBLE` is 5 at ROW_H 9 and the top menu (6 items) scrolls via
   `scroll_to_sel()`. Adding a 7th menu entry needs no layout change, but
