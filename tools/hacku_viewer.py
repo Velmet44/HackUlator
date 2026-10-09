@@ -258,7 +258,7 @@ def run_viewer(port=None, baud=460800, echo_log=True, no_reset=False,
     root = tk.Tk()
     root.title(f"HACKULATOR — {port} @ {baud}")
     root.configure(bg="black")
-    root.geometry(f"{W*2}x{H*2}")
+    root.geometry(f"{W*4}x{H*4 + 24}")
     root.minsize(W, H)
 
     status = tk.Label(root, text="waiting for frames...", fg="#8f8", bg="black",
@@ -288,6 +288,13 @@ def run_viewer(port=None, baud=460800, echo_log=True, no_reset=False,
         s = min(avail_w / w, avail_h / h)
         if s <= 0:
             return
+        # Integer scale keeps 1px OLED glyphs crisp: fractional NEAREST
+        # makes some source pixels 1 and others 2 display px wide, which
+        # turns the 4px font into mush. Fall back to fractional only when
+        # the window is smaller than the native frame.
+        si = int(s)
+        if si >= 1:
+            s = si
         nw = max(1, int(w * s))
         nh = max(1, int(h * s))
         im = raw.resize((nw, nh), Image.NEAREST)
