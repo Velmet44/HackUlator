@@ -54,6 +54,12 @@ uint32_t svc_sniff_other(void);  /* control/misc, kept out of the headline */
  * climbs near traffic and falls to 0 when the device walks away. */
 uint32_t svc_sniff_rate(void);
 
+/* Frames that passed the BSSID filter since start - in SNIFF_TRAFFIC mode
+ * these are the target's DATA frames, i.e. its real traffic. Deliberately
+ * excludes management so the device's own injected deauth/beacon frames can
+ * never inflate the figure an attack is judged by. */
+uint32_t svc_sniff_hits(void);
+
 /* Strongest (least negative) RSSI seen this run, in dBm. Only meaningful
  * when svc_sniff_have_rssi() is 1 - the sentinel before the first frame is
  * -128, which is below any real reading. */

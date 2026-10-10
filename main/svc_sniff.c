@@ -30,6 +30,10 @@ static int          s_channel = 1;
 static volatile uint32_t s_win_frames;
 static volatile uint32_t s_rate;
 static int64_t s_win_us;
+/* Frames that passed the BSSID filter (SNIFF_TRAFFIC only). This is the
+ * "victim traffic" figure an attack is judged against. Data frames only, so
+ * the device's own injected MANAGEMENT frames cannot inflate it. */
+static volatile uint32_t s_hit_total;
 
 /* Beacon self-check. Each beacon states its own beacon interval, so the
  * expected rate follows from the air itself - no second receiver needed.
@@ -165,6 +169,7 @@ static void IRAM_ATTR rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
                 }
             }
             s_win_frames++;
+            s_hit_total++;
             break;
         case SNIFF_PROBE:
             if (type != WIFI_PKT_MGMT) {
@@ -227,6 +232,7 @@ int svc_sniff_start(sniff_mode_t mode, const uint8_t *filter_bssid) {
     s_other = 0;
     s_best_rssi = SNIFF_RSSI_NONE;
     s_win_frames = 0;
+    s_hit_total = 0;
     s_rate = 0;
     s_win_us = esp_timer_get_time();
     s_bseen_n = 0;
@@ -321,6 +327,8 @@ uint32_t svc_sniff_poll_total(void) { return s_total; }
 
 uint32_t svc_sniff_rate(void) { return s_rate; }
 
+uint32_t svc_sniff_hits(void) { return s_hit_total; }
+
 int svc_sniff_best_rssi(void) { return s_best_rssi; }
 
 int svc_sniff_have_rssi(void) { return s_best_rssi != SNIFF_RSSI_NONE; }
@@ -346,6 +354,7 @@ int svc_sniff_set_channel(int ch) {
     s_other = 0;
     s_best_rssi = SNIFF_RSSI_NONE;
     s_win_frames = 0;
+    s_hit_total = 0;
     s_rate = 0;
     s_win_us = esp_timer_get_time();
     s_bseen_n = 0;
