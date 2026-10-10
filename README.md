@@ -13,6 +13,13 @@ Target: classic **ESP32-WROOM**, 0.96" **SSD1306 128x64 OLED** (I2C), 6 buttons.
 - **WiFi scan**: sorted by RSSI; detail shows MAC / RSSI / channel / auth / ciphers / PHY / WPS / FTM / country, plus a **2.5 s activity sample** — how busy the AP's channel was (frames/s) and how many frames came from that BSSID. The sample covers only the strongest AP's channel; networks on other channels report `not sampled` rather than a wrong number
 - **BLE scan** (~5 s): deduped by MAC; detail shows name / MAC / RSSI / addr type / adv type / TX / flags / service UUID / manufacturer / **advert count** for the scan window. Advert rate is *not* a load figure — a phone and a fitness tracker advertise at similar rates whether idle or streaming — so no invented "busy %" is shown
 - **Session attack targets**: pick a target from any scan detail view with RIGHT (footer flips to `selected`); stored in RAM only, cleared on reboot. Separate slots for WiFi (keyed by BSSID) and BLE (keyed by MAC).
+- **BLE attacks** → **ADV flood**: broadcasts one phantom BLE device advertising as fast as the specification allows, so nearby scanners spend their time parsing adverts that lead nowhere. `OK` opens a **name-list picker** first, mirroring the WiFi beacon SSID picker:
+  - `COMMON` — vendor-plausible device names (`Fitbit Charge 5`, `Galaxy Buds2`, `Tile Tracker`, …)
+  - `GARBAGE` — random printable junk, generated on the fly so it never repeats
+  - `RICKROLL` — bait names
+  - `SECURITY` — scam / scare names
+  - `ALL` — one of the above per run
+  Live status shows the configured rate and time remaining; the counters band shows `est <n>` and the chosen list. Needs no session target. The phantom shows up in a scanner list under whatever name was drawn.
 - **WiFi attacks** (UP/DOWN selects, OK runs, 100 ms cadence, 3-minute auto-stop):
   1. **Deauth** — subtype `0xC`, reason 2. Works pre-authentication.
   2. **Disassoc** — subtype `0xA`, reason 1. Only meaningful to an already-associated client.
@@ -89,6 +96,10 @@ All Python tools accept `--port` (auto-detected if omitted) and work on Windows 
 | `hk_test.py` | Headless end-to-end verifier (calculator, unlock, scans, relock) |
 | `hk_test_deauth.py` | Deauth flow verifier (target select → run → counter → stop) |
 | `hk_test_rx.py` | Passive verifiers (menu scroll → submenus → RX monitor → BACK → BLE adv monitor) |
+| `hk_probe_contam.py` | Contamination probe: does RX count our own injected frames? |
+| `hk_test_advflood.py` | BLE ADV flood flow verifier (picker → run → counter → stop → relock) |
+| `hk_advtest.c` | Host-compiled check of the BLE advertising payload builder (AD lengths, 31-byte budget) |
+| `hk_ocr.py` | Decode screen text from a captured PNG or a live frame (debugging aid, not a test oracle) |
 | `hk_activity.py` | Walk both scan detail views to the new activity fields |
 | `hk_validate_rx.py` | Counter-accuracy harness: scan for reference APs, hop to a channel, screenshot the self-check panel |
 | `hk_log.py` | Capture one boot log over UART0 @ 115200 |
@@ -134,6 +145,10 @@ Measured on a strong local AP (−25 dBm, 1 AP on ch6, 100 TU interval): **~86% 
 **Passive is not invisible.** "Passive" here means the device does not transmit: no injected frames, no `SCAN_REQ`, no probe responses, no association. It is not anonymity — the ESP32 still radiates its own management frames, and the passive BLE scan uses a random address that changes per session but is still a radio that is visibly present. Do not rely on these modes to avoid detection.
 
 **Scan activity is a sample, not a census.** The WiFi detail view reports a 2.5 s listen burst on the strongest AP's channel only. Networks on other channels read `sampled chN only` rather than a number that would not describe them. And unlike the RX monitor — continuous but lossy — a scan sample is brief but unbiased, so it can miss traffic that bursts outside its window.
+
+**The BLE ADV flood is capped at 50 adverts/sec, by the spec.** `esp_ble_adv_params_t.adv_int_min` counts 0.625 ms units and its valid range starts at `0x0020` — 20 ms — so a legal advertising event rate is 50/s and no configuration raises it. Classic ESP32 also has no `ble_multi_adv_instances` field (only the h2/h4/c2/c5/c6 targets do), so there is exactly **one** advertising set: this is a *rate* flood with a **single fixed identity**, not a pool. The name is drawn once at start and cannot rotate without stopping and restarting, which would cost more than it buys. This is why the WiFi beacon pool's 20-identity architecture does not port across.
+
+**The ADV flood's counter is an estimate, not a measurement.** Bluedroid exposes no per-advertising-event callback — the only advertising events are `ADV_DATA_SET_COMPLETE` (once per run) and `ADV_TERMINATED` (once). So `svc_ble_flood_est()` is `elapsed / interval`, which is why the UI labels it `est`. The honest real signal is `started`, which confirms the payload actually went on air. Never read the counter as proof of what reached the air or of any effect on another device; proving that needs a second receiver watching a victim's BLE discovery.
 
 **Deauth is 2.4 GHz only.** The ESP32 cannot touch 5 GHz, so a client on `SSID-5G` is unaffected even while the flood runs. Target the 2.4 GHz SSID and confirm the client is on that band.
 

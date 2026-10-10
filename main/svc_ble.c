@@ -3,6 +3,7 @@
 #include "esp_bt_main.h"
 #include "esp_gap_ble_api.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
@@ -29,6 +30,26 @@ static volatile uint32_t s_adv_rate;
 #define BLE_RSSI_NONE (-128)
 static int s_adv_best_rssi;
 static int64_t s_adv_win_us;
+
+/* ---- ADV flood state ----
+ * Declared up here rather than with the flood code below because gap_cb()
+ * touches s_flood_started and svc_ble_stop() touches s_flood_running, and
+ * both appear earlier in this file.
+ *
+ * adv_int_min counts 0.625 ms units, NOT milliseconds - see the flood
+ * section at the bottom for the full set of hardware limits.
+ */
+#define BLEADV_NAME_MAX 26
+#define BLEADV_RAW_MAX  31
+#define BLEADV_INTERVAL_UNITS 0x0020u   /* 20 ms -> 50 events/s */
+#define BLEADV_INTERVAL_MS    20u
+
+static int s_flood_running;
+static volatile uint32_t s_flood_started;  /* real event count, 1 per run */
+static int64_t s_flood_t0_us;
+static int s_flood_start_err;
+static char s_flood_name[BLEADV_NAME_MAX + 1];
+static bleadv_name_mode_t s_name_mode = BLEADV_NAMES_COMMON;
 
 /* Look up one AD type in the adv payload, then the scan-response payload. */
 static uint8_t *adv_lookup(esp_ble_gap_cb_param_t *p, int type, uint8_t *len) {
@@ -79,6 +100,25 @@ static void fill_name(ble_dev_t *dv, esp_ble_gap_cb_param_t *p) {
 }
 
 static void gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p) {
+    /* ADV lifecycle, before the scan-result early-out. This runs in the BT
+     * callback context, so it ONLY counts and flags. It must never stop the
+     * advertising or tear the controller down: esp_bluedroid_deinit() from
+     * inside a GAP callback pulls the stack out from under the BT task, which
+     * is the same class of fault as svc_deauth's orphan TX timer. The owner
+     * polls svc_ble_flood_expired() and calls svc_ble_flood_stop().
+     *
+     * Bluedroid has NO per-advertising-event callback: these are the only two
+     * advertising events that exist, and each fires once per run. That is
+     * exactly why svc_ble_flood_est() has to be derived rather than counted. */
+    if (event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT) {
+        if (s_flood_running) {
+            s_flood_started++; /* real confirmation the payload went on air */
+        }
+        return;
+    }
+    if (event == ESP_GAP_BLE_ADV_TERMINATED_EVT) {
+        return;
+    }
     if (event != ESP_GAP_BLE_SCAN_RESULT_EVT)
         return;
     if (p->scan_rst.search_evt != ESP_GAP_SEARCH_INQ_RES_EVT)
@@ -176,6 +216,12 @@ static int ble_up(void) {
 int svc_ble_scan(ble_dev_t *out, int max, int seconds) {
     if (!out || max <= 0 || max > BLE_MAX_DEV || seconds <= 0)
         return -1;
+    /* Scanning and advertising share one controller and one radio. If a flood
+     * is somehow still live (a screen that forgot to stop it), stand it down
+     * rather than run both: a scanner that is also transmitting answers its
+     * own SCAN_REQ and the scan results stop meaning anything. The UI already
+     * guarantees this on every exit path; this is the backstop. */
+    svc_ble_flood_stop();
     int up = ble_up();
     if (up != 0)
         return up; /* -10..-15: see ble_up */
@@ -194,6 +240,12 @@ int svc_ble_scan(ble_dev_t *out, int max, int seconds) {
 void svc_ble_stop(void) {
     if (!s_enabled)
         return;
+    /* Advertising must be stopped explicitly: the controller keeps beaconing
+     * after bluedroid is disabled otherwise, and a live ADV set is the BLE
+     * equivalent of svc_deauth's orphan TX timer. Order matches the caller's
+     * documented contract - stop the GAP activity, then unwind the stack. */
+    s_flood_running = 0;
+    esp_ble_gap_stop_advertising();
     esp_ble_gap_stop_scanning();
     esp_bluedroid_disable();
     esp_bluedroid_deinit();
@@ -212,6 +264,7 @@ int svc_ble_passive_start(void) {
     /* A passive scan must not send SCAN_REQ or SCAN_RSP: scanning actively
      * would make the radio reply, which is the opposite of listening. The
      * own address is random so a passive monitor is not identifiable. */
+    svc_ble_flood_stop(); /* one radio: never listen and transmit at once */
     int up = ble_up();
     if (up != 0)
         return up;
@@ -266,3 +319,223 @@ uint32_t svc_ble_adv_tick(void) {
 }
 
 int svc_ble_adv_best_rssi(void) { return s_adv_best_rssi; }
+
+/* ---- ADV flood ----
+ *
+ * Two hard limits shape this whole section, and both were read out of the
+ * ESP-IDF headers rather than assumed:
+ *
+ *  1. esp_ble_adv_params_t.adv_int_min counts 0.625 ms units and its valid
+ *     range starts at 0x0020, i.e. 20 ms. That caps a legal advertising event
+ *     rate at 50/s. No config raises it.
+ *  2. Classic ESP32's esp_bt.h has no ble_multi_adv_instances field (h2, h4,
+ *     c2, c5 and c6 do). One advertising set, one identity. svc_deauth can
+ *     run 20 fake APs because each is a separate esp_wifi_80211_tx() call;
+ *     here the controller owns the cadence and reports no per-packet
+ *     feedback at all.
+ */
+
+/* A legacy advertising payload is 31 bytes total. Flags cost 3 (length +
+ * type + value) and a complete local name costs 2 + n, so 26 bytes of name
+ * still fits beside the flags. Names are clamped rather than truncated
+ * mid-element, because a name whose AD length byte disagrees with its payload
+ * is malformed, not merely ugly. */
+
+/* Name sources, mirroring svc_deauth's beacon wordlists. The name is chosen
+ * once per start: with a single advertising set it cannot be rotated without
+ * stopping and restarting, which costs far more than it buys. */
+static const char *const s_names_common[] = {
+    "HUAWEI Watch GT 3", "Fitbit Charge 5", "Galaxy Buds2", "AirPods Pro",
+    "Tile Tracker", "Govee Sensor", "Sony WF-1000XM4", "Beats Studio Buds",
+    "Yale Linus", "SwitchBot Meter", "Echo Dot", "Nest Mini",
+};
+static const char *const s_names_rickroll[] = {
+    "Never Gonna Give You Up", "Together Forever", "Rickroll",
+    "Never Gonna Let You Down",
+};
+static const char *const s_names_security[] = {
+    "Free Public WiFi", "FBI Surveillance Van", "Update Your iPhone",
+    "Microsoft Support", "IT Helpdesk", "Your Account Hacked",
+};
+#define NEL(a) (sizeof(a) / sizeof((a)[0]))
+
+/* Pick a name for the active wordlist. GARBAGE is generated, so it never
+ * repeats and costs no flash. */
+static void flood_pick_name(char *out, size_t out_sz) {
+    bleadv_name_mode_t m = s_name_mode;
+    if (m == BLEADV_NAMES_ALL) {
+        m = (bleadv_name_mode_t)(esp_random() % BLEADV_NAMES_COUNT);
+    }
+    if (m == BLEADV_NAMES_GARBAGE) {
+        /* Printable but meaningless. 0x00 is excluded because it would
+         * truncate the name the UI logs. */
+        static const char alpha[] =
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
+        size_t n = 4u + (size_t)(esp_random() % (BLEADV_NAME_MAX - 4u));
+        if (n > out_sz - 1) {
+            n = out_sz - 1;
+        }
+        for (size_t i = 0; i < n; i++) {
+            out[i] = alpha[esp_random() % (sizeof(alpha) - 1)];
+        }
+        out[n] = 0;
+        return;
+    }
+    const char *const *tbl;
+    size_t n;
+    if (m == BLEADV_NAMES_RICKROLL) {
+        tbl = s_names_rickroll;
+        n = NEL(s_names_rickroll);
+    } else if (m == BLEADV_NAMES_SECURITY) {
+        tbl = s_names_security;
+        n = NEL(s_names_security);
+    } else {
+        tbl = s_names_common;
+        n = NEL(s_names_common);
+    }
+    snprintf(out, out_sz, "%s", tbl[esp_random() % n]);
+}
+
+/* Build the raw payload: flags + one complete local name. Returns the byte
+ * length, or <0 if the name would not fit. */
+static int flood_build_raw(uint8_t *raw, size_t raw_sz) {
+    char name[BLEADV_NAME_MAX + 1];
+    flood_pick_name(name, sizeof(name));
+    size_t nl = strlen(name);
+    if (nl == 0 || nl > BLEADV_NAME_MAX) {
+        return -1;
+    }
+    if (raw_sz < nl + 5u) {
+        return -1;
+    }
+    size_t i = 0;
+    /* LE General Discoverable (0x02) | BR/EDR not supported (0x04). Without
+     * 0x04 some scanners treat the phantom as a classic device. */
+    raw[i++] = 2;
+    raw[i++] = ESP_BLE_AD_TYPE_FLAG;
+    raw[i++] = 0x06;
+    raw[i++] = (uint8_t)(nl + 1); /* AD length counts type + payload */
+    raw[i++] = ESP_BLE_AD_TYPE_NAME_CMPL;
+    memcpy(raw + i, name, nl);
+    i += nl;
+    snprintf(s_flood_name, sizeof(s_flood_name), "%s", name);
+    return (int)i;
+}
+
+int svc_ble_flood_start(void) {
+    int up = ble_up();
+    if (up != 0) {
+        return up; /* -10..-15: see ble_up */
+    }
+    /* The flood and the passive monitor both claim the controller; only one
+     * may hold it. Starting the flood stands the monitor down. */
+    svc_ble_passive_stop();
+
+    uint8_t raw[BLEADV_RAW_MAX];
+    int n = flood_build_raw(raw, sizeof(raw));
+    if (n < 0) {
+        s_flood_start_err = -17;
+        return s_flood_start_err;
+    }
+    if (esp_ble_gap_config_adv_data_raw(raw, (uint32_t)n) != ESP_OK) {
+        s_flood_start_err = -17;
+        return s_flood_start_err;
+    }
+
+    /* NONCONN_IND, not ADV_TYPE_IND: a connectable advertisement makes the
+     * controller honour SCAN_REQ and accept connections, spending airtime on
+     * replies and inviting state the flood does not want. Pure broadcast is
+     * strictly more adverts per second for the same air budget. */
+    esp_ble_adv_params_t p = {
+        .adv_int_min        = BLEADV_INTERVAL_UNITS,
+        .adv_int_max        = BLEADV_INTERVAL_UNITS,
+        .adv_type           = ADV_TYPE_NONCONN_IND,
+        .own_addr_type      = BLE_ADDR_TYPE_PUBLIC,
+        .peer_addr          = {0},
+        .peer_addr_type     = BLE_ADDR_TYPE_PUBLIC,
+        .channel_map        = ADV_CHNL_ALL, /* 37 + 38 + 39 */
+        .adv_filter_policy  = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
+    };
+    if (esp_ble_gap_start_advertising(&p) != ESP_OK) {
+        s_flood_start_err = -18;
+        return s_flood_start_err;
+    }
+    s_flood_running = 1;
+    s_flood_started = 0;
+    s_flood_start_err = 0;
+    s_flood_t0_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "adv flood up: \"%s\" at %u/s",
+             s_flood_name, (unsigned)svc_ble_flood_rate());
+    return 0;
+}
+
+void svc_ble_flood_stop(void) {
+    if (!s_flood_running) {
+        return;
+    }
+    /* Only the owner calls this (main loop / ui_bleatk_tick), never from the
+     * GAP callback - see the svc_ble_flood_expired() note in the header. */
+    esp_ble_gap_stop_advertising();
+    s_flood_running = 0;
+    ESP_LOGI(TAG, "adv flood off after %u s",
+             (unsigned)svc_ble_flood_elapsed_s());
+}
+
+int svc_ble_flood_running(void) { return s_flood_running; }
+
+const char *svc_ble_flood_name(void) { return s_flood_name; }
+
+uint32_t svc_ble_flood_started(void) { return s_flood_started; }
+
+uint32_t svc_ble_flood_rate(void) { return 1000u / BLEADV_INTERVAL_MS; }
+
+/* DERIVED, not measured. See the header: Bluedroid reports no per-packet
+ * advertising feedback, so this is elapsed / interval. */
+uint32_t svc_ble_flood_est(void) {
+    if (!s_flood_running) {
+        return 0;
+    }
+    int64_t ms = (esp_timer_get_time() - s_flood_t0_us) / 1000;
+    if (ms < 0) {
+        return 0;
+    }
+    return (uint32_t)ms / BLEADV_INTERVAL_MS;
+}
+
+uint32_t svc_ble_flood_elapsed_s(void) {
+    return (uint32_t)((esp_timer_get_time() - s_flood_t0_us) / 1000000);
+}
+
+uint32_t svc_ble_flood_remaining_s(void) {
+    if (svc_ble_flood_expired()) {
+        return 0;
+    }
+    uint32_t e = svc_ble_flood_elapsed_s();
+    return e >= BLEADV_TIMEOUT_S ? 0 : (BLEADV_TIMEOUT_S - e);
+}
+
+int svc_ble_flood_expired(void) {
+    return s_flood_running && svc_ble_flood_elapsed_s() >= BLEADV_TIMEOUT_S;
+}
+
+int svc_ble_flood_start_error(void) { return s_flood_start_err; }
+
+void svc_ble_flood_set_name_mode(bleadv_name_mode_t m) {
+    if ((int)m < 0 || m >= BLEADV_NAMES_COUNT) {
+        m = BLEADV_NAMES_COMMON;
+    }
+    s_name_mode = m;
+}
+
+bleadv_name_mode_t svc_ble_flood_name_mode(void) { return s_name_mode; }
+
+const char *svc_ble_flood_name_mode_name(bleadv_name_mode_t m) {
+    switch (m) {
+    case BLEADV_NAMES_COMMON:  return "COMMON";
+    case BLEADV_NAMES_GARBAGE: return "GARBAGE";
+    case BLEADV_NAMES_RICKROLL: return "RICKROLL";
+    case BLEADV_NAMES_SECURITY: return "SECURITY";
+    case BLEADV_NAMES_ALL:     return "ALL";
+    default:                   return "COMMON";
+    }
+}

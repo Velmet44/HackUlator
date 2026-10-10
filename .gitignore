@@ -27,6 +27,7 @@ test_mem4/
 test_mem5/
 test_mem6/
 test_deauth/
+test_advflood/
 tools/probe_*.png
 
 # Third-party reference repos (read-only, cloned on demand for study)

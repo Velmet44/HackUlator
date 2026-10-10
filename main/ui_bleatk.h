@@ -1,6 +1,9 @@
 #pragma once
 
-/* BLE attacks screen (placeholder: attack list goes here). */
+/* BLE attacks screen. Currently one mode: ADV flood (self-targeting, so it
+ * never calls ui_bleatk_require()). The mode list and the wordlist picker
+ * follow ui_wifiatk.c's layout, including the two-phase auto-stop rule that
+ * lives in ui_bleatk_tick() rather than the radio callback. */
 
 #include "hal_input.h"
 

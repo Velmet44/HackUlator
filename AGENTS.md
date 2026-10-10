@@ -60,6 +60,13 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   for "traffic appeared / disappeared", never a completeness claim.
   `svc_sniff_set_channel()` (UP/DOWN) resets the counters per hop so a rate
   always describes one band.
+* **The victim-traffic metric counts DATA frames only.** `svc_sniff_hits()`
+  counts frames that passed the BSSID filter in `SNIFF_TRAFFIC` mode, and
+  that mode rejects everything that is not `WIFI_PKT_DATA`. Every frame the
+  device INJECTS is management (deauth `0xC0`, disassoc `0xA0`, beacon
+  `0x80`), so the attack's own output cannot inflate the figure the attack
+  is judged by. Never widen this to "all frames" without re-proving it —
+  `tools/hk_probe_contam.py` is the test.
 * **`ui_wifiscan_run()` blocks ~2.5 s longer than it used to.** After the
   scan it runs `svc_sniff_burst()` on the strongest AP's channel. Headless
   tests that wait a fixed time for the scan list must allow for that, and
@@ -80,6 +87,59 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   `LIST_VISIBLE` is 5 at ROW_H 9 and the top menu (6 items) scrolls via
   `scroll_to_sel()`. Adding a 7th menu entry needs no layout change, but
   verify the scroll window reaches the last row.
+* **`svc_ble.c` ADV flood: the ceiling is the BLE spec, not a config.**
+  `adv_int_min`/`adv_int_max` are counts of **0.625 ms units**, not
+  milliseconds, and their range starts at `0x0020` (= 20 ms), so the fastest
+  legal advertising event rate is **50/s**. Classic ESP32's `esp_bt.h` has no
+  `ble_multi_adv_instances` field (h2/h4/c2/c5/c6 do), so there is ONE
+  advertising set and ONE identity: a rate flood, not a pool. The name is
+  picked once in `flood_build_raw()` and cannot be rotated without
+  stop/restart. Do not "optimise" the interval below `0x0020` — the controller
+  will clamp it and any claim of a higher rate is false.
+* **The ADV flood counter is DERIVED; never present it as measured.**
+  Bluedroid has no per-advertising-event callback — only
+  `ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT` (once per run) and
+  `ESP_GAP_BLE_ADV_TERMINATED_EVT`. So `svc_ble_flood_est()` is
+  `elapsed / interval` and the UI prints `est` deliberately.
+  `svc_ble_flood_started()` is the only real feedback (it goes to 1 when the
+  payload is on air). Widening `est` into a packet count, or dropping the
+  `est` label, would be a lie in the same way as presenting a relative sniff
+  rate as an absolute one.
+* **GAP callback never stops advertising.** `gap_cb()` counts and flags only.
+  `ui_bleatk_tick()` polls `svc_ble_flood_expired()` and calls
+  `svc_ble_flood_stop()` — the same two-phase rule as `svc_deauth`'s TX timer,
+  for the same reason: `esp_bluedroid_deinit()` from inside a BT callback
+  pulls the stack out from under the BT task. `svc_ble_stop()` must also stop
+  advertising (it does) before unwinding the controller.
+* **BLE is one radio: scan, listen and advertise are mutually exclusive.**
+  `svc_ble_flood_start()` stands down the passive monitor, and
+  `svc_ble_scan()` / `svc_ble_passive_start()` stand the flood down. The UI
+  guarantees this on every exit path; the service calls are the backstop. A
+  radio that scans while advertising answers its own `SCAN_REQ`, which
+  quietly ruins both jobs.
+* **The ADV flood must never call `ui_bleatk_require()`.** It is
+  self-targeting, exactly like WiFi beacon spam. `main.c` opens the attacks
+  screen unconditionally and `BLEATK_EXIT_SCAN` stays dead code until a
+  genuinely targeted BLE mode exists.
+* `tools/hk_advtest.c` compiles `flood_pick_name()` / `flood_build_raw()` on
+  a PC against stub RNG and length helpers, and checks the AD structure and
+  the 31-byte legacy budget. **The two copies are kept in sync by hand** — if
+  you change the builder in `svc_ble.c`, change it there too. The alternative
+  (compiling `svc_ble.c` for the host) drags in `esp_bt.h`.
+* **`ui_bleatk.c` return codes are load-bearing: `0` means STAY.** A sub-handler
+  (e.g. `picker_key()`) must return `0`, never `1`. `BLEATK_EXIT_MENU` is
+  literally `1`, so returning `1` from anywhere inside the screen makes
+  `main.c` treat the keypress as "leave to menu" and eject the user — the next
+  keypress then lands on the top menu and navigates somewhere unrelated. This
+  presents as "the attack silently did nothing and a random screen appeared",
+  with no crash and no log. Same trap as `WIFATK_EXIT_*` / `BLEATK_EXIT_*`;
+  `ui_wifiatk.c` gets it right, so copy that file's convention.
+* `tools/hk_ocr.py` decodes screen text straight from `main/font_oled.h` (4x9
+  fixed cell, one byte per row). Text is drawn at arbitrary y AND centred text
+  starts at an arbitrary x (`draw_msg` puts a 13-char line at x=38), so it
+  brute-forces both offsets and scores every glyph; rows reading at avg 36.00
+  are exact. Debugging aid only — it is not a test oracle, and a captured
+  frame can be torn because the caster drops frames rather than queueing.
 * `ui_status.*` — bottom bar `"34K W:abc B:def"` (free KB + targets).
   Calculator has no bar (disguise); detail views keep action footers.
 * `svc_wifi.c` / `svc_ble.c` — lazy radio bring-up, full teardown on stop.
