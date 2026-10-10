@@ -73,6 +73,50 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   busy network natural variance (~±40 f/s) swamps a 10 f/s injection, so
   the A/B says nothing. That is a limit of the experiment, not of the
   metric, and it is why earlier attempts here were inconclusive.
+* **PowerKill (`DEAUTH_MODE_POWERKILL`) is the TPC/CSA beacon under the
+  target's OWN BSSID**, ported from `ESP32WifiPhisher`'s
+  `wifi_attack_deauth_client_negative_tx_power()`. Beacons carry no 802.11w
+  protection, so it is meant to reach PMF clients that discard forged deauth.
+  Phase A (20 s, `POWERKILL_PHASE_A_S`) sends the beacon alone; phase B adds
+  deauth + disassoc. The TX buffer had to go `f[80]` -> `f[160]` first: the
+  frame is ~107 B with a 32-char SSID and RSN, and 80 truncated it silently.
+  **MEASURED**: 3 drops / 0 control, all three in **phase B**. Zero drops
+  across phase A. Against a WPA2-PSK client the CSA half did nothing - plain
+  deauth did all the work, which is expected, because the case PowerKill
+  exists for is a WPA3/PMF client and none was available to test. Do not
+  claim it beats deauth without a PMF victim; it is still an unproven 20 s
+  of dead time on any client that honours deauth.
+* **`svc_wifi_scan()`'s record cap was a correctness bug, not just a
+  heap guard.** It was a flat `if (n > 8) n = 8;`, and records come back
+  RSSI-ordered - so every scan was silently truncated to the 8 STRONGEST
+  networks, and `tgt_wifi_verify()` searches that list by BSSID. An armed AP
+  weaker than 8th place reported "target not found" while beaconing. Now
+  heap-adaptive (`SCAN_HEAP_RESERVE`), and at ~112 B/record the old cap spent
+  under 1 KB to discard most of the map. **Note**: this was NOT the cause of
+  the failure it was first blamed on - that environment had 5 APs, all under
+  the cap. A latent bug for dense settings, still worth fixing, but do not
+  cite it as an explanation without checking the AP count first.
+* **`tgt_wifi_verify()` listens before it scans.** `svc_sniff_burst()` on the
+  target's known channel (~1200 ms, ~12 expected beacons) proves presence
+  without a 2.4 GHz sweep or a 3.2 KB scan buffer. Falls back to a scan only
+  when unheard. `tgt_wifi_verify_ex(force_scan=1)` skips the fast path -
+  **required** for channel-following, because listening on the old channel
+  cannot discover a move by construction.
+* **Channel-following is skipped while the meter is live.** Promiscuous RX
+  and scanning share the receiver and running both makes the scan fail.
+  Tearing the meter down to check would reset its counters and destroy the
+  reading in progress, so measuring wins. `ui_wifiatk_tick()` re-verifies
+  every `FOLLOW_PERIOD_S` and calls `svc_deauth_follow_channel()`
+  **unconditionally** after a present check - the scan leaves the radio
+  wherever it finished, so skipping the call strands the attack off-channel
+  even when the channel never changed.
+* **A band can have TWO painters.** `draw()` and `ui_wifiatk_tick()` both
+  paint the attack status band, and the tick runs every 500 ms during an
+  attack. They each had their own copy of the text and the tick silently won,
+  hiding the PowerKill phase tag for an entire run - screenshots read a bare
+  "30/s" while the attack sat in phase B. Both now call one `status_text()`.
+  Same trap as the dual `*_key()` return codes: a duplicated code path will
+  drift, and the one that is harder to notice is the one that wins.
 * **`ui_wifiscan_run()` blocks ~2.5 s longer than it used to.** After the
   scan it runs `svc_sniff_burst()` on the strongest AP's channel. Headless
   tests that wait a fixed time for the scan list must allow for that, and
@@ -197,6 +241,27 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
 
 ## Test
 
+* `tools/hk_probe_victim.py COMx [secs] [--load] [--control]` — the only
+  attack test here that measures **effect** rather than transmission. It
+  watches the PC's own adapter and reports *time on target*: the fraction of
+  samples still associated with the target AP on 2.4 GHz. `--load` holds a
+  ~5.6 MB/s download for a real baseline, `--control` runs the whole
+  sequence with nothing launched. **Always run `--control` first** -
+  disconnects happen on their own, and one observed drop proves nothing
+  without it. Three traps it encodes:
+  - `netsh` blanks SSID/Band/Channel while associating. Treat that as *no
+    information*, never as a state - feeding the blanks in turned three
+    ordinary reconnects into phantom "band hop to 5 GHz" events, which is
+    how a real effect nearly got published with a false mechanism.
+  - `netsh` costs ~1 s per call, so the real sampling interval is ~1 s, not
+    the 0.4 s `POLL` suggests. Report the measured rate; a drop shorter than
+    the interval can be missed entirely.
+  - Event times must be stamped relative to launch, or phase A (0-20 s,
+    beacon only) and phase B cannot be told apart. This is what proved the
+    PowerKill drops were all phase B.
+  Cloudflare's `__down` endpoint silently returns a **1-byte body** above
+  ~20 MB instead of erroring, so it looks like an instant download; keep the
+  request at 20 MB and repeat it inside ONE curl process.
 * `tools/hacku_viewer.py --port COMx` — live display viewer + remote keys
   (`wasd`/`e`/`b`). `tools/hk_test.py --port COMx [--cycles N]` —
   headless pass/fail incl. multi-cycle heap screenshots.

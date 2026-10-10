@@ -20,8 +20,16 @@ typedef enum {
     DEAUTH_MODE_DISASSOC = 1, /* 0xA only, reason 0x01 */
     DEAUTH_MODE_COMBINED = 2, /* 0xC + 0xA per tick */
     DEAUTH_MODE_BEACON = 3,   /* pool of fake-AP beacons, channel-hopped */
+    /* TPC/CSA/Quiet beacon carrying the TARGET'S REAL BSSID. Beacons are not
+     * protected by 802.11w, so this reaches clients that ignore deauth.
+     * Inserted after BEACON: earlier slots are already in the field. */
+    DEAUTH_MODE_POWERKILL = 4,
     DEAUTH_MODE_COUNT
 } deauth_mode_t;
+
+/* Phase A runs the TPC beacon alone, then escalates automatically: some
+ * stacks honour CSA, others need the blunt deauth/disassoc as well. */
+#define POWERKILL_PHASE_A_S 20
 
 /* 1 = this mode needs a session target and must be verified before it
  * runs; 0 = it invents its own targets (beacon spam). */
@@ -76,4 +84,17 @@ uint32_t svc_deauth_elapsed_s(void);
 uint32_t svc_deauth_remaining_s(void); /* 0 once expired */
 deauth_mode_t svc_deauth_mode(void);   /* mode currently running */
 const char *svc_deauth_mode_name(deauth_mode_t m); /* short UI label */
+
+/* Re-pin a RUNNING attack to a different channel, for when the target AP
+ * moves. Beacon spam hops on its own, so it refuses. Returns the channel now
+ * in use, or <0 if the driver refused the switch (the pin is then left
+ * untouched - better a stale channel than a radio with no channel). */
+int svc_deauth_follow_channel(int ch);
 #define DEAUTH_TIMEOUT_S 180         /* 3 minutes */
+
+/* PowerKill phase: 0 = beacon only (A), 1 = beacon + deauth + disassoc (B).
+ * Derived from elapsed time, so the TX callback stays stateless. */
+int svc_deauth_powerkill_phase(void);
+/* Frames sent in each phase, for the counters band. */
+uint32_t svc_deauth_phase_a_frames(void);
+uint32_t svc_deauth_phase_b_frames(void);

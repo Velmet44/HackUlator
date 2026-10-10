@@ -45,6 +45,11 @@ static int cmp_ap(const void *a, const void *b) {
 
 #include <stdlib.h>
 
+/* Headroom the scan must leave in the largest free block. heap_ok_or_reboot()
+ * reboots under 16 K, so a scan that eats the last big block is a reboot
+ * waiting to happen. */
+#define SCAN_HEAP_RESERVE 20480
+
 int svc_wifi_scan(wifi_ap_t *out, int max) {
     if (!out || max <= 0)
         return -1;
@@ -69,9 +74,29 @@ int svc_wifi_scan(wifi_ap_t *out, int max) {
         n = (uint16_t)max;
 
     /* Cap the record array: the driver mallocs its own contiguous block
-     * internally, so a huge request here just fragments the heap. */
-    if (n > 8)
-        n = 8;
+     * internally, so a huge request here just fragments the heap.
+     *
+     * This was a flat 8, and records come back RSSI-ordered - so the cap
+     * silently truncated every scan to the 8 STRONGEST networks.
+     * tgt_wifi_verify() searches that list by BSSID, which made an armed AP
+     * weaker than 8th place report "target not found" while it sat there
+     * beaconing. The cap protects the heap, not correctness, so size it to
+     * the heap instead: sizeof(wifi_ap_record_t) is ~112 B, meaning the old
+     * limit spent under 1 KB and discarded most of the map for nothing.
+     *
+     * Keep SCAN_HEAP_RESERVE free afterwards: heap_ok_or_reboot() reboots
+     * below 16 K, so leave headroom rather than spending the last block. */
+    unsigned largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    int cap = 8;
+    while (cap < (int)max &&
+           (unsigned)(cap + 1) * sizeof(wifi_ap_record_t) +
+                   SCAN_HEAP_RESERVE <
+               largest) {
+        cap++;
+    }
+    if (n > (uint16_t)cap) {
+        n = (uint16_t)cap;
+    }
     if (n == 0) {
         /* Empty scan is a valid result, not an OOM: malloc(0) returns NULL
          * and used to be reported as a bogus failure (-5). */

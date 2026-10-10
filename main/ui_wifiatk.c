@@ -31,6 +31,11 @@ static int s_picker_sel = 0;  /* cursor inside the picker */
  * and watch the figure collapse. */
 static int s_meas = 0;
 
+/* Elapsed-seconds stamp of the last channel-follow check; 0 = not yet done.
+ * Keyed off the attack's own clock so it needs no timer of its own and
+ * restarts naturally with every launch. */
+static uint32_t s_last_follow_s;
+
 /* Victim-traffic measurement on/off. Data frames only, so the deauth /
  * beacon frames this device injects cannot be counted as victim traffic. */
 static void meas_start(void) {
@@ -131,7 +136,21 @@ static void draw_msg(const char *l1, const char *l2) {
 static void draw_stats(oled_fb_t *fb) {
     char st[33];
     unsigned long n = (unsigned long)svc_deauth_frames();
-    if (s_sel == DEAUTH_MODE_BEACON) {
+    if (s_sel == DEAUTH_MODE_POWERKILL) {
+        /* Split by phase so the escalation is visible, not inferred. */
+        unsigned long a = (unsigned long)svc_deauth_phase_a_frames();
+        unsigned long b = (unsigned long)svc_deauth_phase_b_frames();
+        if (n > 999999UL) {
+            n = 999999UL;
+        }
+        if (a > 9999UL) {
+            a = 9999UL;
+        }
+        if (b > 99999UL) {
+            b = 99999UL;
+        }
+        snprintf(st, sizeof(st), "f%lu a%lu b%lu", n, a, b);
+    } else if (s_sel == DEAUTH_MODE_BEACON) {
         unsigned long ap = (unsigned long)svc_deauth_fake_aps();
         if (n > 999999UL) {
             n = 999999UL;
@@ -152,6 +171,80 @@ static void draw_stats(oled_fb_t *fb) {
     st[32] = 0;
     int sw = oled_text_w(&oled_font, st);
     oled_text(fb, &oled_font, (OLED_W - sw) / 2, STATS_Y, st, 1);
+}
+
+/* The status band's text, built in ONE place.
+ *
+ * draw() and ui_wifiatk_tick() both paint this line, and the tick runs every
+ * 500 ms during an attack. When each had its own copy the tick's won, which
+ * hid the PowerKill phase tag for the entire run - the screenshots showed a
+ * bare "30/s" while the attack sat in phase B. One helper, no drift. */
+static void status_text(char *buf, size_t n) {
+    if (svc_deauth_tx_error()) {
+        snprintf(buf, n, "tx err %d", svc_deauth_tx_error());
+        return;
+    }
+    if (svc_deauth_running()) {
+        /* Phase tag is PowerKill-only; other modes keep the plain rate. */
+        char ph[3] = { 0, 0, 0 };
+        if (s_sel == DEAUTH_MODE_POWERKILL) {
+            ph[0] = ' ';
+            ph[1] = svc_deauth_powerkill_phase() ? 'B' : 'A';
+        }
+        snprintf(buf, n, "%s%lu/s %lu s", ph, (unsigned long)svc_deauth_fps(),
+                 (unsigned long)svc_deauth_remaining_s());
+        return;
+    }
+    if (s_timed_out) {
+        snprintf(buf, n, "done-timeout");
+        return;
+    }
+    snprintf(buf, n, "idle OK=run BK=exit");
+}
+
+/* How often to re-check that the target is still where we pinned the radio.
+ * A full scan is ~2.4 s of blocked radio, so this is periodic, not
+ * continuous. */
+#define FOLLOW_PERIOD_S 15
+
+/* Channel-following: a running attack is pinned to the channel it launched
+ * on, so an AP that moves turns the attack into noise on an empty band.
+ *
+ * Re-checked on the tick, never from the TX timer - a scan has no business
+ * running on the WiFi task next to the injection loop.
+ *
+ * Skipped while the meter is live. Promiscuous RX and scanning share the
+ * receiver and running both makes the scan fail, which is the same trap the
+ * launch path already handles. The alternative - tearing the meter down to
+ * check - would reset its counters and destroy the reading in progress, so
+ * measuring wins and the check waits for the next gap.
+ *
+ * Uses the forced scan because the question is "which channel is it on",
+ * and listening on the old channel cannot answer that by construction. */
+static void follow_target(void) {
+    if (s_meas || !svc_deauth_mode_needs_target(svc_deauth_mode())) {
+        return;
+    }
+    uint32_t el = svc_deauth_elapsed_s();
+    if (el < FOLLOW_PERIOD_S) {
+        return;
+    }
+    if (s_last_follow_s && el - s_last_follow_s < FOLLOW_PERIOD_S) {
+        return;
+    }
+    s_last_follow_s = el;
+
+    int v = tgt_wifi_verify_ex(1);
+    if (v == TGT_WIFI_PRESENT) {
+        /* Re-pin unconditionally, not just on a change: the scan moves the
+         * radio across every channel in the band and leaves it wherever it
+         * finished, so skipping the call would strand the attack on an
+         * unrelated channel. Cheap when the channel is unchanged. */
+        svc_deauth_follow_channel(tgt_wifi_channel());
+    }
+    /* ABSENT is deliberately not acted on. One missed check should not kill
+     * a running attack - the next one is 15 s away and the 180 s timeout is
+     * the real backstop. */
 }
 
 static void draw(void) {
@@ -191,17 +284,7 @@ static void draw(void) {
     /* Live status: rate + time left. */
     {
         char st[33];
-        if (svc_deauth_tx_error()) {
-            snprintf(st, sizeof(st), "tx err %d", svc_deauth_tx_error());
-        } else if (svc_deauth_running()) {
-            snprintf(st, sizeof(st), "%lu/s %lu s",
-                     (unsigned long)svc_deauth_fps(),
-                     (unsigned long)svc_deauth_remaining_s());
-        } else if (s_timed_out) {
-            snprintf(st, sizeof(st), "done-timeout");
-        } else {
-            snprintf(st, sizeof(st), "idle OK=run BK=exit");
-        }
+        status_text(st, sizeof(st));
         st[32] = 0;
         int sw = oled_text_w(&oled_font, st);
         oled_text(fb, &oled_font, (OLED_W - sw) / 2, STATUS_Y, st, 1);
@@ -280,15 +363,10 @@ int ui_wifiatk_tick(void) {
     if (!svc_deauth_running()) {
         return 0;
     }
+    follow_target();
     oled_fb_t *fb = hal_oled_fb();
     char st[33];
-    if (svc_deauth_tx_error()) {
-        snprintf(st, sizeof(st), "tx err %d", svc_deauth_tx_error());
-    } else {
-        snprintf(st, sizeof(st), "%lu/s %lu s",
-                 (unsigned long)svc_deauth_fps(),
-                 (unsigned long)svc_deauth_remaining_s());
-    }
+    status_text(st, sizeof(st));
     st[32] = 0;
     int sw = oled_text_w(&oled_font, st);
     /* Repaint both bands (status + counters) as one 18 px strip. */
@@ -409,12 +487,18 @@ int ui_wifiatk_key(hacku_key_t k) {
             if (was_meas) {
                 meas_start();
             }
-            draw_msg(v < 0 ? "verify failed" : "target not found",
+            /* Name the actual failure. "verify failed" hid whether the scan
+             * ran at all, which is the difference between "your AP moved"
+             * and "the radio failed" - and sent me hunting the wrong one. */
+            draw_msg(v == TGT_WIFI_NO_MEM ? "out of memory" :
+                     v == TGT_WIFI_SCAN_ERR ? "scan failed" :
+                     "target not found",
                      "opening scan...");
             vTaskDelay(pdMS_TO_TICKS(1200));
             return WIFATK_EXIT_SCAN;
         }
         s_timed_out = 0;
+        s_last_follow_s = 0; /* fresh attack: re-check after one period */
         int r = svc_deauth_start(s_sel);
         if (r < 0) {
             show_start_error(r);
