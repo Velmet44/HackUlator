@@ -57,6 +57,39 @@ static volatile uint32_t s_beacon_win;
 static volatile uint32_t s_beacon_rate;
 static volatile uint16_t s_beacon_interval;
 
+/* ---- bytes / airtime ----
+ * Byte totals are exact. The airtime figure is derived from them at read
+ * time, never in the callback, so the callback stays a counter bump. */
+static volatile uint32_t s_bytes;
+static volatile uint32_t s_bytes_mgmt;
+/* When the current run began. Written from the start/stop paths, never from
+ * the callback - esp_timer_get_time() is not IRAM-safe. */
+static int64_t s_run_start_us;
+
+/* ---- per-source client tally ----
+ * addr2 (offset 10) is the transmitter for every frame received. 8 slots of
+ * 12 bytes, static, linear scan: a lookup table would be faster but this is
+ * already far below anything the WiFi task notices, and it keeps the
+ * callback free of anything that could fault. */
+typedef struct {
+    uint8_t  mac[6];
+    uint32_t frames;
+} client_seen_t;
+
+static client_seen_t s_clients[CLIENT_TRACK_MAX];
+static int s_clients_n;
+
+/* ---- passive deauth detector ----
+ * Counts deauth/disassoc frames RECEIVED. A client's own deauth to its AP
+ * is management traffic the monitor would see anyway; what matters is the
+ * volume and the sources, so both are kept. Sources cap out because a flood
+ * has many senders and the point is "how many stations, and which". */
+#define DEAUTH_TRACK_MAX 6
+static volatile uint32_t s_deauth_rx;
+static uint8_t  s_deauth_src[DEAUTH_TRACK_MAX][6];
+static uint32_t s_deauth_from[DEAUTH_TRACK_MAX];
+static int s_deauth_n;
+
 /* Rate ticker, created on start and destroyed on stop. */
 static esp_timer_handle_t s_rate_timer;
 
@@ -88,6 +121,14 @@ static void IRAM_ATTR rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         s_best_rssi = rssi;
     }
 
+    /* Exact byte totals, split by frame class so airtime can charge each at
+     * a plausible PHY rate. Done before the 24-byte guard because sig_len is
+     * valid regardless; the airtime estimate needs no MAC header. */
+    s_bytes += p->rx_ctrl.sig_len;
+    if (type == WIFI_PKT_MGMT) {
+        s_bytes_mgmt += p->rx_ctrl.sig_len;
+    }
+
     /* Tagged-frame filters need the MAC header. A valid 802.11 frame is at
      * least 24 bytes; anything shorter is a driver artefact, not air
      * traffic, and must not be indexed into. */
@@ -95,11 +136,68 @@ static void IRAM_ATTR rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         return;
     }
 
-    /* Beacon self-check. In the FC byte the protocol version is bits 0-1,
-     * TYPE is bits 2-3 and SUBTYPE is bits 4-7 - so a beacon is
-     * type 0 / subtype 8, i.e. byte0 == 0x80. Masking the low nibble
-     * instead matches 0x88 (QoS-Data) and counts data frames as beacons. */
+    /* Two detections that share the header we already know is safe to read.
+     * Both are pure counters - no payload is kept, no allocation happens on
+     * the WiFi task.
+     *
+     * In the FC byte the protocol version is bits 0-1, TYPE is bits 2-3 and
+     * SUBTYPE is bits 4-7 - so a beacon is type 0 / subtype 8, i.e. byte0 ==
+     * 0x80. Masking the low nibble instead matches 0x88 (QoS-Data) and counts
+     * data frames as beacons. Declared here rather than further down because
+     * the two detectors below need it too. */
     const uint8_t fc0 = p->payload[0];
+
+    /* Deauth/disassoc detector. FC type 0 is management; subtype 12 (0x0C)
+     * is deauth and 10 (0x0A) is disassociation - both in bits 4-7, not the
+     * low nibble. */
+    if ((fc0 & 0x0C) == 0x00) {
+        uint8_t sub = (uint8_t)((fc0 >> 4) & 0x0F);
+        if (sub == 0x0C || sub == 0x0A) {
+            s_deauth_rx++;
+            const uint8_t *src = p->payload + 10; /* addr2 = transmitter */
+            int slot = -1;
+            for (int i = 0; i < s_deauth_n; i++) {
+                if (memcmp(s_deauth_src[i], src, 6) == 0) {
+                    slot = i;
+                    break;
+                }
+            }
+            if (slot < 0 && s_deauth_n < DEAUTH_TRACK_MAX) {
+                slot = s_deauth_n++;
+                memcpy(s_deauth_src[slot], src, 6);
+                s_deauth_from[slot] = 0;
+            }
+            if (slot >= 0) {
+                s_deauth_from[slot]++;
+            }
+        }
+    }
+
+    /* Per-source tally, data frames only. Counting management here would let
+     * one device's probe retries dominate the whole list and make a quiet
+     * network look busy - the tally answers "who is TRANSMITTING traffic",
+     * and addr2 is the transmitter. */
+    if (type == WIFI_PKT_DATA) {
+        const uint8_t *src = p->payload + 10;
+        int slot = -1;
+        for (int i = 0; i < s_clients_n; i++) {
+            if (memcmp(s_clients[i].mac, src, 6) == 0) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0 && s_clients_n < CLIENT_TRACK_MAX) {
+            slot = s_clients_n++;
+            memcpy(s_clients[slot].mac, src, 6);
+            s_clients[slot].frames = 0;
+        }
+        if (slot >= 0) {
+            s_clients[slot].frames++;
+        }
+    }
+
+    /* Beacon self-check. fc0 is declared above, next to the two detectors that
+     * need it too. */
     if ((fc0 & 0x0C) == 0x00 && ((fc0 >> 4) & 0x0F) == 0x08 &&
         p->rx_ctrl.sig_len >= 38) {
         const uint8_t *bs = p->payload + 16;
@@ -241,6 +339,18 @@ int svc_sniff_start(sniff_mode_t mode, const uint8_t *filter_bssid) {
     s_beacon_win = 0;
     s_beacon_rate = 0;
     s_beacon_interval = 0;
+    /* Bytes / airtime / per-source / deauth-detector state all describe one
+     * run, so they reset with the rest of it. s_run_start_us is what makes
+     * airtime a fraction of elapsed time rather than an absolute count. */
+    s_bytes = 0;
+    s_bytes_mgmt = 0;
+    s_clients_n = 0;
+    memset(s_clients, 0, sizeof(s_clients));
+    s_deauth_rx = 0;
+    s_deauth_n = 0;
+    memset(s_deauth_src, 0, sizeof(s_deauth_src));
+    memset(s_deauth_from, 0, sizeof(s_deauth_from));
+    s_run_start_us = esp_timer_get_time();
 
     if (esp_wifi_set_promiscuous(true) != ESP_OK) {
         s_mode = SNIFF_OFF;
@@ -401,6 +511,15 @@ int svc_sniff_burst(int channel, int ms, sniff_burst_t *out) {
     s_data = 0;
     s_bseen_n = 0;
     memset(s_bseen, 0, sizeof(s_bseen));
+    /* Same resets as svc_sniff_start: the survey calls this once per
+     * channel, and without them every channel would inherit the previous
+     * one's byte/client/deauth totals. */
+    s_bytes = 0;
+    s_bytes_mgmt = 0;
+    s_clients_n = 0;
+    s_deauth_rx = 0;
+    s_deauth_n = 0;
+    s_run_start_us = esp_timer_get_time();
     s_burst = 1;
 
     wifi_promiscuous_filter_t f = {
@@ -452,6 +571,113 @@ int svc_sniff_burst(int channel, int ms, sniff_burst_t *out) {
 }
 
 uint16_t svc_sniff_beacon_interval(void) { return s_beacon_interval; }
+
+uint32_t svc_sniff_bytes(void) {
+    /* s_bytes already includes management - s_bytes_mgmt is a SUBSET kept
+     * only so airtime can charge the two classes at different PHY rates.
+     * Adding them double-counts every management frame. */
+    return (uint32_t)s_bytes;
+}
+
+uint32_t svc_sniff_airtime_permille(void) {
+    /* Charge data at a nominal 54 Mbit/s OFDM rate and management at
+     * 6 Mbit/s, then express as permille of the run so far. This deliberately
+     * ignores preamble, inter-frame spacing and contention, so a busy band
+     * can read over 1000 - that is a property of the estimate, not a claim
+     * about the air, and the header says so. */
+    uint32_t tot = (uint32_t)s_bytes;
+    uint32_t mgmt = (uint32_t)s_bytes_mgmt;
+    uint32_t data = tot > mgmt ? tot - mgmt : 0;
+    /* microseconds of airtime: data 8 bits/byte at 54 Mbit/s, mgmt at 6. */
+    uint64_t us = (uint64_t)data * 8 * 1000000ULL / 54000000ULL;
+    us += (uint64_t)mgmt * 8 * 1000000ULL / 6000000ULL;
+
+    int64_t elapsed = esp_timer_get_time() - s_run_start_us;
+    if (elapsed <= 0) {
+        return 0;
+    }
+    uint64_t permille = us * 1000ULL / (uint64_t)elapsed;
+    if (permille > 0xFFFFFFFFULL) {
+        permille = 0xFFFFFFFFULL;
+    }
+    return (uint32_t)permille;
+}
+
+int svc_sniff_clients(void) { return s_clients_n; }
+
+uint32_t svc_sniff_client_frames(int slot) {
+    if (slot < 0 || slot >= s_clients_n) {
+        return 0;
+    }
+    return s_clients[slot].frames;
+}
+
+const uint8_t *svc_sniff_client_mac(int slot) {
+    if (slot < 0 || slot >= s_clients_n) {
+        return NULL;
+    }
+    return s_clients[slot].mac;
+}
+
+uint32_t svc_sniff_deauth_rx(void) {
+    return (uint32_t)s_deauth_rx;
+}
+
+int svc_sniff_deauth_sources(void) { return s_deauth_n; }
+
+const uint8_t *svc_sniff_deauth_mac(int slot) {
+    if (slot < 0 || slot >= s_deauth_n) {
+        return NULL;
+    }
+    return s_deauth_src[slot];
+}
+
+uint32_t svc_sniff_deauth_from(int slot) {
+    if (slot < 0 || slot >= s_deauth_n) {
+        return 0;
+    }
+    return s_deauth_from[slot];
+}
+
+int svc_sniff_survey(int ms_per_ch, sniff_survey_t *out) {
+    if (!out || ms_per_ch <= 0) {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    out->quietest = 0;
+    out->loudest = 0;
+
+    uint32_t quiet_score = 0xFFFFFFFFu;
+    uint32_t loud_score = 0;
+    for (int ch = 1; ch <= SURVEY_CH_MAX; ch++) {
+        sniff_burst_t b;
+        if (svc_sniff_burst(ch, ms_per_ch, &b) < 0) {
+            out->failed++;
+            continue;
+        }
+        int i = out->n++;
+        out->ch[i].channel = (uint8_t)ch;
+        out->ch[i].total = b.total;
+        out->ch[i].data = b.data;
+        out->ch[i].aps = b.n;
+        for (int a = 0; a < b.n && a < SNIFF_AP_TRACK; a++) {
+            out->ch[i].beacons += b.ap[a].beacons;
+        }
+        /* Weight data heavily: a stray beacon on an otherwise dead channel
+         * is survivable, actual traffic is not. mgmt is left out on purpose -
+         * probe traffic can look busy on a channel nobody transmits on. */
+        uint32_t score = b.total * 4 + b.data * 4;
+        if (score < quiet_score) {
+            quiet_score = score;
+            out->quietest = ch;
+        }
+        if (score > loud_score) {
+            loud_score = score;
+            out->loudest = ch;
+        }
+    }
+    return out->n;
+}
 
 /* Expected beacon rate from the advertised intervals, in milli-Hz.
  *

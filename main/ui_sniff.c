@@ -26,9 +26,12 @@
 #define BLOCK_Y   RATE_Y
 #define BLOCK_H   (ROW4_Y + 9 - RATE_Y)
 
-/* OK toggles the self-check panel. It is diagnostic, not everyday reading,
- * so it stays off the default view. */
-static int s_diag;
+/* OK cycles three panels. The default view stays the plain counters and the
+ * diagnostic panels stay hidden, because they are not everyday reading.
+ * A toggle could not hold three states, and stacking panels behind a
+ * submenu for two extra rows of text is not worth the navigation. */
+enum { PANEL_COUNTERS = 0, PANEL_DIAG, PANEL_LIVE };
+static int s_panel = PANEL_COUNTERS;
 
 static void draw_msg(const char *l1, const char *l2) {
     oled_fb_t *fb = hal_oled_fb();
@@ -113,6 +116,65 @@ static void draw_diag(char *line) {
     put(line, 4, ROW4_Y);
 }
 
+/* Live instrumentation panel: captured airtime, who is transmitting, and the
+ * passive deauth detector.
+ *
+ * "cap air" is deliberately NOT labelled "airtime" or "channel busy": it is
+ * the airtime of the frames this device caught, and at 2.4 GHz that is about
+ * a tenth of the real channel. Measured against a 31.6 Mbit/s download the
+ * link was ~59% occupied while this read 5%. The estimate is correct for the
+ * bytes received; calling it occupancy would not be. */
+static void draw_live(char *line) {
+    uint32_t perm = svc_sniff_airtime_permille();
+    uint32_t bytes = svc_sniff_bytes();
+    snprintf(line, 33, "capair %lu%%  %luKB",
+             clamp_ul(perm / 10u, 9999UL), clamp_ul(bytes / 1024u, 99999UL));
+    put(line, 4, RATE_Y);
+
+    /* "tx src", not "devices": addr2 is the transmitter, and on a download
+     * the busiest sender is the AP itself - the top entry came back as
+     * 28:a9:15:6b:93:19, which is JioFibre's own BSSID, not a client. */
+    int n = svc_sniff_clients();
+    uint32_t top = 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t fr = svc_sniff_client_frames(i);
+        if (fr > top) {
+            top = fr;
+        }
+    }
+    snprintf(line, 33, "%d tx src  top %lu",
+             n, clamp_ul(top, 99999UL));
+    put(line, 4, ROW2_Y);
+
+    const uint8_t *m = n > 0 ? svc_sniff_client_mac(0) : NULL;
+    if (m) {
+        snprintf(line, 33, "%02x:%02x:%02x:%02x:%02x:%02x",
+                 m[0], m[1], m[2], m[3], m[4], m[5]);
+    } else {
+        snprintf(line, 33, "no data frames yet");
+    }
+    put(line, 4, ROW3_Y);
+
+    uint32_t d = svc_sniff_deauth_rx();
+    if (d) {
+        snprintf(line, 33, "DEAUTH %lu from %d",
+                 clamp_ul(d, 99999UL), svc_sniff_deauth_sources());
+    } else {
+        snprintf(line, 33, "no deauth heard");
+    }
+    put(line, 4, ROW4_Y);
+}
+
+static void draw_panel(char *line) {
+    if (s_panel == PANEL_DIAG) {
+        draw_diag(line);
+    } else if (s_panel == PANEL_LIVE) {
+        draw_live(line);
+    } else {
+        draw_counters(line);
+    }
+}
+
 static void draw(void) {
     oled_fb_t *fb = hal_oled_fb();
     oled_clear(fb, 0);
@@ -121,11 +183,7 @@ static void draw(void) {
     oled_text(fb, &oled_font, (OLED_W - hw) / 2, 0, head, 1);
 
     char line[33];
-    if (s_diag) {
-        draw_diag(line);
-    } else {
-        draw_counters(line);
-    }
+    draw_panel(line);
 
     {
         char st[20];
@@ -133,7 +191,7 @@ static void draw(void) {
         int sw = oled_text_w(&oled_font, st);
         oled_text(fb, &oled_font, (OLED_W - sw) / 2, STAT_Y, st, 1);
     }
-    const char *hint = s_diag ? "OK back   BK exit" :
+    const char *hint = s_panel ? "OK next   BK exit" :
                                   "UP/DN ch  OK chk  BK exit";
     int w = oled_text_w(&oled_font, hint);
     oled_text(fb, &oled_font, (OLED_W - w) / 2, HINT_Y, hint, 1);
@@ -143,7 +201,7 @@ static void draw(void) {
 void ui_sniff_run(void) {
     svc_sniff_stop();          /* idempotent: clean slate if re-entered */
     svc_ble_stop();            /* one radio at a time */
-    s_diag = 0;
+    s_panel = PANEL_COUNTERS;
     int r = svc_sniff_start(SNIFF_ALL, NULL);
     if (r < 0) {
         const char *e =
@@ -167,11 +225,7 @@ int ui_sniff_tick(void) {
      * a single caster rect on the wire. */
     oled_fill_rect(fb, 0, BLOCK_Y, OLED_W, BLOCK_H, 0);
     char line[33];
-    if (s_diag) {
-        draw_diag(line);
-    } else {
-        draw_counters(line);
-    }
+    draw_panel(line);
     hal_oled_flush(0, BLOCK_Y, OLED_W, BLOCK_H);
     return 1;
 }
@@ -182,7 +236,7 @@ int ui_sniff_key(hacku_key_t k) {
         return SNIFF_EXIT_MENU;
     }
     if (k == KEY_OK) {
-        s_diag = !s_diag;
+        s_panel = (s_panel + 1) % 3;
         draw();
         return 0;
     }

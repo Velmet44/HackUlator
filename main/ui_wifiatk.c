@@ -16,13 +16,19 @@
 #include <stdio.h>
 
 #define ROW_H 9
-#define LIST_Y0 10        /* 4 mode rows: 10..45 */
+#define LIST_Y0 10        /* mode rows start here */
 #define STATUS_Y 46       /* status band: 46..54 */
 #define STATS_Y 55        /* counters band: 55..63 */
 #define PICK_Y0  10       /* 5 name-list rows: 10..54 */
+/* Rows that actually FIT above the status band, derived from the geometry so
+ * they cannot drift: PowerKill is mode 5, and with a hardcoded window the 5th
+ * entry drew at y=46 underneath the status band, leaving the mode you were
+ * running invisible. If STATUS_Y or ROW_H moves, this follows. */
+#define LIST_VISIBLE ((STATUS_Y - LIST_Y0) / ROW_H)
 
 static int s_timed_out = 0;   /* last run ended on its own 3-min timeout */
 static deauth_mode_t s_sel = DEAUTH_MODE_DEAUTH; /* attack list cursor */
+static int s_top = 0;          /* first visible mode row (scroll window) */
 static int s_picker = 0;      /* 1 = SSID-list picker is open */
 static int s_picker_sel = 0;  /* cursor inside the picker */
 /* RIGHT toggles the measurement panel: promiscuous RX filtered to the
@@ -247,6 +253,25 @@ static void follow_target(void) {
      * the real backstop. */
 }
 
+/* Keep the cursor inside the scroll window. Wrapping means s_top has to be
+ * recomputed from scratch, not nudged: a wrap from the last mode back to the
+ * first would otherwise leave the cursor above the window. */
+static void scroll_to_sel(void) {
+    int sel = (int)s_sel;
+    if (sel < s_top) {
+        s_top = sel;
+    }
+    if (sel >= s_top + LIST_VISIBLE) {
+        s_top = sel - LIST_VISIBLE + 1;
+    }
+    if (s_top > DEAUTH_MODE_COUNT - LIST_VISIBLE) {
+        s_top = DEAUTH_MODE_COUNT - LIST_VISIBLE;
+    }
+    if (s_top < 0) {
+        s_top = 0;
+    }
+}
+
 static void draw(void) {
     oled_fb_t *fb = hal_oled_fb();
     oled_clear(fb, 0);
@@ -268,9 +293,15 @@ static void draw(void) {
     int hw = oled_text_w(&oled_font, head);
     oled_text(fb, &oled_font, (OLED_W - hw) / 2, 0, head, 1);
     /* Attack list (UP/DOWN navigates, OK launches). Beacon spam needs no
-     * target and asks for an SSID list first. */
-    for (int i = 0; i < DEAUTH_MODE_COUNT; i++) {
-        int y = LIST_Y0 + i * ROW_H;
+     * target and asks for an SSID list first. Only LIST_VISIBLE rows fit
+     * above the status band, so render the scroll window - drawing every
+     * mode unconditionally puts the 5th one underneath the status band. */
+    int last = s_top + LIST_VISIBLE - 1;
+    if (last > DEAUTH_MODE_COUNT - 1) {
+        last = DEAUTH_MODE_COUNT - 1;
+    }
+    for (int i = s_top; i <= last; i++) {
+        int y = LIST_Y0 + (i - s_top) * ROW_H;
         deauth_mode_t m = (deauth_mode_t)i;
         int on = (m == s_sel);
         char lb[33];
@@ -381,6 +412,9 @@ void ui_wifiatk_run(void) {
     s_timed_out = 0; /* entering the screen clears a stale timeout note */
     s_picker = 0;
     s_meas = 0;
+    /* The cursor persists between visits, so the window may need catching up
+     * with it - otherwise re-entering on mode 5 shows an empty bottom row. */
+    scroll_to_sel();
     draw();
     hacku_input_drain();
 }
@@ -438,11 +472,13 @@ int ui_wifiatk_key(hacku_key_t k) {
     if (k == KEY_UP) {
         s_sel = (deauth_mode_t)((s_sel + DEAUTH_MODE_COUNT - 1) %
                                 DEAUTH_MODE_COUNT);
+        scroll_to_sel();
         draw();
         return 0;
     }
     if (k == KEY_DOWN) {
         s_sel = (deauth_mode_t)((s_sel + 1) % DEAUTH_MODE_COUNT);
+        scroll_to_sel();
         draw();
         return 0;
     }
@@ -499,6 +535,32 @@ int ui_wifiatk_key(hacku_key_t k) {
         }
         s_timed_out = 0;
         s_last_follow_s = 0; /* fresh attack: re-check after one period */
+        /* PowerKill and CSAonly carry a Channel Switch Announcement, and the
+         * channel it names decides whether that element does anything. A
+         * survey costs ~7 s of blocked radio, so it runs ONLY for these two
+         * modes and only when the user has not already measured a quiet
+         * channel this session. The meter, if live, has to stand down for
+         * it - promiscuous RX and sweeping the band fight over the receiver.
+         */
+        if ((s_sel == DEAUTH_MODE_POWERKILL || s_sel == DEAUTH_MODE_CSA) &&
+            !svc_deauth_csa_surveyed()) {
+            int was_m = s_meas;
+            if (was_m) {
+                svc_sniff_stop();
+                s_meas = 0;
+            }
+            draw_msg("finding quiet channel", NULL);
+            sniff_survey_t sv;
+            if (svc_sniff_survey(350, &sv) > 0 && sv.quietest > 0) {
+                /* -2 here means the quietest channel IS the target's, in
+                 * which case there is nothing sensible to steer a client
+                 * to; leave the builder's own choice in place. */
+                svc_deauth_set_csa_channel(sv.quietest);
+            }
+            if (was_m) {
+                meas_start();
+            }
+        }
         int r = svc_deauth_start(s_sel);
         if (r < 0) {
             show_start_error(r);

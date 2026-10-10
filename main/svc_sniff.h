@@ -107,6 +107,85 @@ typedef struct {
  * Returns the total frame count, or <0 on failure. */
 int svc_sniff_burst(int channel, int ms, sniff_burst_t *out);
 
+/* ---- channel survey ----
+ * Sweep all 13 channels, listening briefly on each, and report what was on
+ * the air. Answers "which channel is actually empty", which the CSA element
+ * in PowerKill needs and currently guesses (always 13).
+ *
+ * Blocking: roughly 13 x (ms + ~120 ms channel settle), so ~7 s at 400 ms per
+ * channel. Do not call it during an attack, and not while the live monitor
+ * runs - the burst takes the promiscuous callback over.
+ *
+ * The quietest channel is chosen on the LOWEST total frame count, weighting
+ * data over beacons: an empty channel with a straggling beacon is still a
+ * worse place to steer a victim than a genuinely idle one. */
+#define SURVEY_CH_MAX 13
+
+typedef struct {
+    uint8_t  channel;
+    uint32_t total;
+    uint32_t beacons;
+    uint32_t data;
+    int      aps;
+} sniff_chan_t;
+
+typedef struct {
+    sniff_chan_t ch[SURVEY_CH_MAX];
+    int n;         /* channels actually sampled (< 13 if one failed) */
+    int quietest;  /* 1..13 */
+    int loudest;
+    int failed;    /* channels that could not be sampled */
+} sniff_survey_t;
+
+int svc_sniff_survey(int ms_per_ch, sniff_survey_t *out);
+
+/* ---- airtime, per-client and deauth-detection instrumentation ----
+ * All three are derived from the same promiscuous RX, so they cost nothing
+ * extra to collect and share the callback's rules: count only, no malloc,
+ * no logging on the WiFi task. */
+
+/* Bytes seen since svc_sniff_start(). Exact - unlike the airtime estimate. */
+uint32_t svc_sniff_bytes(void);
+
+/* Estimated CAPTURED airtime in permille (1000 = 100% of a second's worth of
+ * airtime at the nominal PHY rates).
+ *
+ * Read this carefully, because the obvious reading is wrong. It is NOT the
+ * channel's occupancy - it is the airtime of the frames THIS DEVICE caught.
+ * The two differ by the capture ratio, and at 2.4 GHz the gap is large: with
+ * only 6 static RX buffers the ESP32 sees on the order of 10% of a busy
+ * link's data frames, so a channel that is 59% occupied reads here as ~5%.
+ *
+ * MEASURED: against a 31.6 Mbit/s download, the PC moved 55.5 MB and the
+ * ESP32 counted 6.4 MB (~10%). True occupancy 59%, this reported 5% - and
+ * the 5% is arithmetically correct for the bytes received, because the
+ * model divides what it saw by a nominal 54 Mbit/s. The estimator is sound;
+ * only the label would have been a lie.
+ *
+ * It is also an ESTIMATE even on its own terms: it charges data at 54 Mbit/s
+ * and management at 6 Mbit/s, ignoring preamble, inter-frame spacing and
+ * contention, so a saturated band can read over 1000. Treat it as "how much
+ * airtime can we account for", never as a statement about the channel. For
+ * anything quantitative use svc_sniff_bytes() and svc_sniff_rate(). */
+uint32_t svc_sniff_airtime_permille(void);
+
+/* Who is talking on this channel: per-source frame tallies, addr2 being the
+ * transmitter. CLIENT_TRACK_MAX entries, most-recently-seen first when full.
+ * Not a device inventory on its own - a single device's probe requests and
+ * retransmissions dominate when nothing is streaming. */
+#define CLIENT_TRACK_MAX 8
+int           svc_sniff_clients(void);
+uint32_t      svc_sniff_client_frames(int slot);
+const uint8_t *svc_sniff_client_mac(int slot);
+
+/* Deauth/disassoc frames received while monitoring. The passive detector:
+ * when this climbs without an attack running, something is trying to drop
+ * US. Sources are kept so you can see whether it is one station or many. */
+uint32_t      svc_sniff_deauth_rx(void);
+int           svc_sniff_deauth_sources(void);
+const uint8_t *svc_sniff_deauth_mac(int slot);
+uint32_t      svc_sniff_deauth_from(int slot);
+
 /* Frame counters are bumped from the WiFi-task callback, so a 32-bit load is
  * not atomic on ESP32. Read through these helpers. */
 uint32_t svc_sniff_poll_total(void);

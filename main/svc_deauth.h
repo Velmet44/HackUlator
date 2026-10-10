@@ -24,6 +24,15 @@ typedef enum {
      * protected by 802.11w, so this reaches clients that ignore deauth.
      * Inserted after BEACON: earlier slots are already in the field. */
     DEAUTH_MODE_POWERKILL = 4,
+    /* The PowerKill beacon with the deauth/disassoc escalation REMOVED - it
+     * never leaves phase A. Exists because the two halves are independent
+     * claims and only measuring them apart can tell which one does anything:
+     * a measured WPA2 victim was dropped entirely in phase B and not at all
+     * in phase A, which says the CSA beacon is inert there - but that client
+     * honours deauth, so it can say nothing about the PMF clients this is
+     * actually for. Sent to your own network only.
+     * Inserted after POWERKILL: earlier slots are already in the field. */
+    DEAUTH_MODE_CSA = 5,
     DEAUTH_MODE_COUNT
 } deauth_mode_t;
 
@@ -90,6 +99,20 @@ const char *svc_deauth_mode_name(deauth_mode_t m); /* short UI label */
  * in use, or <0 if the driver refused the switch (the pin is then left
  * untouched - better a stale channel than a radio with no channel). */
 int svc_deauth_follow_channel(int ch);
+
+/* Channel the CSA element steers the victim to. 0 until a survey runs, after
+ * which the launch path feeds in the quietest channel it measured - the
+ * beacon previously always said 13, which is not reliably empty, so the CSA
+ * was steering into a coin flip.
+ *
+ * Rejects the attack's own channel (-2): a switch to where the client
+ * already is is a no-op, and a beacon that does that marks itself as forged
+ * to any stack paying attention. */
+int svc_deauth_set_csa_channel(int ch);
+int svc_deauth_csa_channel(void);
+/* 1 once a survey has supplied a channel, so the launch path can tell
+ * "not measured yet" from "measured, and the answer was the target's". */
+int svc_deauth_csa_surveyed(void);
 #define DEAUTH_TIMEOUT_S 180         /* 3 minutes */
 
 /* PowerKill phase: 0 = beacon only (A), 1 = beacon + deauth + disassoc (B).

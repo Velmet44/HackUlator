@@ -17,6 +17,7 @@
 #include "ui_blepassive.h"
 #include "ui_bleadv.h"
 #include "ui_wifipassive.h"
+#include "ui_survey.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
@@ -38,13 +39,14 @@ typedef enum {
     SCR_SNIFF,
     SCR_BLEPASSIVE,
     SCR_BLEADV,
+    SCR_SURVEY,
 } screen_t;
 
 static const char *MENU_ITEMS[] = {
     "WiFi scan", "BLE scan", "WiFi attacks", "BLE attacks",
-    "WiFi passive", "BLE passive",
+    "WiFi passive", "BLE passive", "Channel survey",
 };
-#define MENU_N 6
+#define MENU_N 7
 
 static int64_t s_last_atk_tick = 0; /* live-attack status repaint (ms) */
 static int64_t s_last_sniff_tick = 0; /* passive counter repaint (ms) */
@@ -112,6 +114,18 @@ static int enter_menu_item(int sel, screen_t *screen_out) {
         svc_ble_stop();
         *screen_out = SCR_BLEPASSIVE;
         ui_blepassive_run();
+        return 1;
+    }
+    if (sel == 6) {                       /* channel survey */
+        svc_deauth_stop();
+        svc_sniff_stop();
+        svc_ble_passive_stop();
+        svc_ble_stop();
+        /* Radio stays up: the survey listens in short bursts across the band
+         * rather than scanning, so it needs the STA path, not a cold radio.
+         * svc_wifi_teardown() here would make it re-init the driver 13 times. */
+        *screen_out = SCR_SURVEY;
+        ui_survey_run();
         return 1;
     }
     return 0;
@@ -209,6 +223,11 @@ void app_main(void) {
                 }
             } else if (screen == SCR_BLESCAN) {
                 if (ui_blescan_key(k)) {
+                    screen = SCR_MENU;
+                    show_menu();
+                }
+            } else if (screen == SCR_SURVEY) {
+                if (ui_survey_key(k) == SURVEY_EXIT_MENU) {
                     screen = SCR_MENU;
                     show_menu();
                 }
