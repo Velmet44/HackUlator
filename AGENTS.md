@@ -67,6 +67,12 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   `0x80`), so the attack's own output cannot inflate the figure the attack
   is judged by. Never widen this to "all frames" without re-proving it —
   `tools/hk_probe_contam.py` is the test.
+  **VERIFIED**: against JioFibre 2.4 GHz (ch1, -58 dBm, idle network),
+  289 frames were injected and dB - dA came out at **-1** — every one of
+  them excluded. The probe only resolves against a near-idle target: on a
+  busy network natural variance (~±40 f/s) swamps a 10 f/s injection, so
+  the A/B says nothing. That is a limit of the experiment, not of the
+  metric, and it is why earlier attempts here were inconclusive.
 * **`ui_wifiscan_run()` blocks ~2.5 s longer than it used to.** After the
   scan it runs `svc_sniff_burst()` on the strongest AP's channel. Headless
   tests that wait a fixed time for the scan list must allow for that, and

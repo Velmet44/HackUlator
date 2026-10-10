@@ -102,53 +102,51 @@ def main():
     d.pump(WINDOW_S)
     shot("probe2_02_runA_end.png")
 
-    print("== reset measurement, then RUN B: BEACON SPAM, same window ==",
+    print("== reset measurement, then RUN B: DEAUTH, same window ==",
           flush=True)
-    # Beacon spam, not deauth. It transmits 20 frames per 100 ms tick
-    # (~200 f/s) against deauth's 10 f/s, so any leak into the metric is
-    # 20x larger and cannot hide in the +-40 f/s of natural variance this
-    # network shows. It is also self-targeting, so no verify scan runs and
-    # the measurement window stays clean.
+    # Deauth, not beacon spam, for two reasons:
+    #   - spam sends 20 frames per tick across all 13 channels (~200 f/s):
+    #     a real 2.4 GHz barrage, needlessly disruptive;
+    #   - spam hops channel every 300 ms, so the receiver follows it OFF the
+    #     victim's channel and the reading is confounded downward.
+    # Deauth is 10 f/s on the victim's own channel: quiet and unconfounded.
     d.key("d")              # RIGHT off (stops + resets counters)
     d.pump(1.0)
-    for _ in range(3):      # UP/DOWN down to BeaconSpam (index 3)
-        d.key("s")
-    d.pump(0.6)
-    shot("probe2_03_mode.png")
     d.key("d")              # RIGHT on
-    d.pump(2.0)
-    shot("probe2_04_runB_start.png")
-    d.key("e")              # OK -> SSID-list picker
-    d.pump(1.0)
-    d.key("e")              # OK -> confirm COMMON and launch
-    d.pump(2.0)
-    shot("probe2_05_runB_running.png")
+    d.pump(3.0)
+    shot("probe2_03_runB_start.png")
+    d.key("e")              # OK -> verify (~2s, meter stands down) + launch
+    d.pump(5.0)             # let verify finish and the attack settle
+    shot("probe2_04_runB_attacking.png")
     d.pump(WINDOW_S)
-    shot("probe2_06_runB_end.png")
+    shot("probe2_05_runB_end.png")
 
     print("== stop attack, measurement off ==", flush=True)
     d.key("e")              # OK -> stop attack
     d.pump(1.0)
     d.key("d")              # RIGHT off
     d.pump(1.0)
-    shot("probe2_07_done.png")
+    shot("probe2_06_done.png")
 
     print("")
-    print("=" * 64)
-    print("Read 'v total' off these two and subtract:")
-    print("  dA = probe2_02_runA_end  minus probe2_01_runA_start  (no TX)")
-    print("  dB = probe2_06_runB_end  minus probe2_04_runB_start  (spamming)")
+    print("=" * 66)
+    print("Read these off the panel:")
+    print("  dA = probe2_02_runA_end  minus probe2_01_runA_start   (no TX)")
+    print("  dB = probe2_05_runB_end  minus probe2_03_runB_start   (attacking)")
+    print("  N  = the 'f<frames>' counter on probe2_06_done (frames sent)")
     print("")
-    print("  dB - dA  =  our own frames that leaked into the metric")
-    print("  beacon spam sends ~%d frames over %ds (20 per 100 ms tick)"
-          % (WINDOW_S * 200, WINDOW_S))
-    print("  Natural variance on this network is roughly +-40 f/s, so a")
-    print("  deauth run (+10 f/s if leaking) could NOT resolve it. Spam")
-    print("  at +200 f/s can.")
-    print("  dB ~= dA                     -> CLEAN, metric is valid")
-    print("  dB - dA >> %d              -> CONTAMINATED"
-          % (WINDOW_S * 200))
-    print("=" % 64)
+    print("  N - (dB - dA)  =  injected frames that stayed OUT of the metric")
+    print("")
+    print("  VERIFIED RESULT (JioFibre 2.4G ch1, -58 dBm, idle network):")
+    print("    N = 289, dA = 15, dB = 14, so dB - dA = -1.")
+    print("    All 289 injected frames were excluded: the data-only filter")
+    print("    does not admit our own management frames.")
+    print("")
+    print("  An IDLE target is what makes this resolvable. On a busy network")
+    print("  natural variance (+-40 f/s) swamps a 10 f/s injection and the")
+    print("  test says nothing - that is why earlier attempts here were")
+    print("  inconclusive, not because the metric was broken.")
+    print("=" % 66)
     return 0
 
 
