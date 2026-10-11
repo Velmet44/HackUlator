@@ -256,7 +256,21 @@ class Dev:
                     return True
         return False
 
-    def shot(self, path):
+    def shot(self, path, fresh=False):
+        # Two separate hazards, both seen producing a torn smear that looks
+        # like a broken screen:
+        #  1. self.fb persists for the whole session, so anything drawn on an
+        #     EARLIER screen stays unless that region was overwritten. Clear it
+        #     and let the device redraw the whole frame.
+        #  2. the caster DROPS frames rather than queuing them, so grabbing
+        #     the buffer straight after a redraw catches a half-received
+        #     frame. Wait for the screen to settle first.
+        if fresh:
+            self.fb = bytearray(W * H * 2)
+        try:
+            self.pump(2.5 if fresh else 0.8)
+        except Exception:
+            pass
         try:
             from PIL import Image
             out = bytearray(W * H * 3)

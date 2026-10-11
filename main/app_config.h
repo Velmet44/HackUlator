@@ -23,6 +23,17 @@
 #define PIN_BTN_OK          14
 #define PIN_BTN_BACK        13
 
+/* ---- One-button gesture ----
+ * GPIO0 is the module's own BOOT button, not one of the six UI keys, so it
+ * is free. A 3 s hold toggles "direct" mode, which drops the calculator
+ * disguise and goes straight to the menu; it lives in RAM only, so a reboot
+ * always comes back disguised.
+ *
+ * Read as a plain input AFTER boot, never as a strap: GPIO0 low at reset
+ * selects the download bootloader, so this must not be used to decide
+ * anything during startup. */
+#define PIN_BTN_ONE         0
+
 /* ---- Caster: PKC wire protocol (compatible with pikachu viewer) ----
  * UART0 @ 460800 baud, shared with the USB console cable.
  * The OLED framebuffer is mono; the caster mirror expands it to RGB565

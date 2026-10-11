@@ -10,6 +10,7 @@ Target: classic **ESP32-WROOM**, 0.96" **SSD1306 128x64 OLED** (I2C), 6 buttons.
 
 - Working calculator disguise (shunting-yard evaluator, `C ( ) / 7 8 9 * 4 5 6 - 1 2 3 + 0 . < =`)
 - Unlock with `4+6=`, relock with OK+BACK hold (2 s), 3x BACK, or 5-min idle
+- **One-button mode** — hold BOOT (GPIO0) or spacebar 3 s to drop the disguise entirely and drive the device from a single input. One way: reboot is the only exit. See [Controls](#controls)
 - **WiFi scan**: sorted by RSSI; detail shows MAC / RSSI / channel / auth / ciphers / PHY / WPS / FTM / country, plus a **2.5 s activity sample** — how busy the AP's channel was (frames/s) and how many frames came from that BSSID. The sample covers only the strongest AP's channel; networks on other channels report `not sampled` rather than a wrong number
 - **BLE scan** (~5 s): deduped by MAC; detail shows name / MAC / RSSI / addr type / adv type / TX / flags / service UUID / manufacturer / **advert count** for the scan window. Advert rate is *not* a load figure — a phone and a fitness tracker advertise at similar rates whether idle or streaming — so no invented "busy %" is shown
 - **Session attack targets**: pick a target from any scan detail view with RIGHT (footer flips to `selected`); stored in RAM only, cleared on reboot. Separate slots for WiFi (keyed by BSSID) and BLE (keyed by MAC).
@@ -40,6 +41,10 @@ Target: classic **ESP32-WROOM**, 0.96" **SSD1306 128x64 OLED** (I2C), 6 buttons.
 - Both passive screens are listen-only and hold no records — no pcap, no handshake capture, no probe harvesting
 - **RX/TX coexistence**: `RIGHT` on the WiFi attacks screen toggles a victim-traffic meter that runs *while* an attack transmits — promiscuous RX filtered to the target's BSSID, counting **data frames only**. Shows victim frames/sec, cumulative total, channel + RSSI, and a beacon capture ratio so you can judge the measurement's own reliability. Press RIGHT again to stop. Because it works whether or not an attack is running, the useful flow is to take a baseline first and then watch the figure collapse
 - **The victim metric is verified uncontaminated.** Measured against an idle network: 289 frames injected, and the meter moved by **zero** beyond the background. Every frame the device injects is management; the meter counts data only, so the attack cannot inflate the number it is judged by. Reproduce with `python tools/hk_probe_contam.py COM5` — use a *quiet* target, since traffic variance on a busy network swamps the measurement
+- **Collateral** (menu item 8) → continuous wideband 2.4 GHz jamming on the WiFi radio, profiled as **BLE / Classic BT / WiFi**. The BLE controller is never touched: its only raw-TX mode is 2 MHz at +9 dBm, whereas one 22 MHz WiFi channel at +19.5 dBm covers eleven 2 MHz BLE channels at once, and a 1 Mbps 2346-byte frame (18.9 ms of airtime) is three times a Bluetooth DH5 packet, so no packet starting inside one can complete. Full/Hot/Burst/Lock/All/Sweep per profile, 3-minute auto-stop, live frame counter and modelled airtime duty
+  - **Lock aims itself.** It surveys the band and parks on the busiest channel that carried a beacon — the beacon filter is what stops a transient data burst on an empty channel from winning. The chosen channel and how many channels held an AP are shown (`aim ch1 of 3 AP ch`), so a survey result can never be mistaken for a guess
+  - **Measured on a victim's own link** (60 cm, AP on channel 1, 3 paired 15 s windows): p50 36-48 ms → 122-146 ms, p90 68 → 383 ms, packet loss 0.0% → 3.8%. Mode ranking puts **Lock** (110.7 ms mean) far clear of the rest; Full/Hot/Burst/All spread airtime over 4 or 13 channels, so the victim's single channel gets a fraction of it. Note the same build also gave 3.5× at 10 cm — six times the distance changed nothing, which a power-limited jammer should not do and which is still unexplained
+  - Discovery and pairing are killable on both Bluetooth protocols with no defence to evade (AFH does not exist before a link). An **established BLE link will not drop** — LE has no ARQ and the supervision timeout needs 267 consecutive misses. An established **Classic** link does, because ACL retries indefinitely, so there is no middle state: audio cuts outright. **WiFi degrades latency; it never disconnects.**
 - One radio at a time (WiFi torn down before BLE and vice versa); full teardown on lock (stealth + power)
 - SSD1306 probe at boot (I2C 0x3C/0x3D); without an OLED the device still runs caster-only
 - PKC dirty-rect caster mirror (always on): mono OLED pixels expanded to RGB565 white/black over UART0 @ 460800 baud + remote keys from viewer
@@ -88,6 +93,19 @@ No ESP-IDF needed to flash a release: see `firmware/README.txt` (esptool only).
 - Physical: 6 buttons navigate the keypad cursor, OK selects, BACK deletes / goes back.
 - Remote (viewer focused): `W/A/S/D` = arrows, `E`/Enter = OK, `B`/Esc = BACK.
 
+### One-button mode
+
+Hold the module's own **BOOT button** (GPIO0) — or the viewer's **spacebar** — for 3 s and the calculator disguise is gone: the device boots straight to the menu, and the six other keys stop responding. This is **one way — only a reboot brings the calculator back**, which is deliberate: a mis-fired hold must never put the disguise back on screen.
+
+| gesture | action |
+|---|---|
+| 1 tap | down / cycle a value |
+| 2 taps | select / enter |
+| 3 taps | back / leave |
+| hold (700 ms) | up |
+
+Every list wraps. `x` fires the 3 s hold directly, for clients that cannot hold a key. A progress bar fills while holding, so a 3 s wait is never silent.
+
 ## Tools (`tools/`)
 
 All Python tools accept `--port` (auto-detected if omitted) and work on Windows / Linux / macOS.
@@ -121,9 +139,9 @@ Screenshots land in `test_out/`, `test_deauth/` (gitignored — throwaway).
 ## Repo layout
 
 ```text
-main/            firmware: ui_* screens (incl. ui_wifipassive/ui_sniff/ui_blepassive),
-                svc_wifi/svc_ble/svc_target/svc_deauth/svc_resume/svc_sniff,
-                hal_oled/hal_input, caster, oled_gfx, font_oled
+main/            firmware: ui_* screens (incl. ui_wifipassive/ui_sniff/ui_blepassive/
+                ui_wicoll), svc_wifi/svc_ble/svc_target/svc_deauth/svc_resume/
+                svc_sniff/svc_wicoll, hal_oled/hal_input, caster, oled_gfx, font_oled
 tools/           viewer + headless verifiers + pixel/log probes
 firmware/        flashable pack (bootloader + partition-table + app + flash scripts)
 CMakeLists.txt   partitions.csv   sdkconfig.defaults   dependencies.lock

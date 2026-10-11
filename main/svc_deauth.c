@@ -402,6 +402,22 @@ int svc_deauth_start(deauth_mode_t mode) {
     if (svc_wifi_init() != 0)
         return -2;
     esp_wifi_set_ps(WIFI_PS_NONE);
+    /* Max TX power. Unit is 0.25 dBm, so 78 = 19.5 dBm - the documented
+     * ceiling for this radio and 10.5 dB above what BLE can reach.
+     *
+     * WARNING - an earlier version of this comment credited this call with
+     * taking the collateral TX loop to high airtime duty. That was wrong on
+     * two counts. Duty came from forcing WIFI_PHY_RATE_1M_L and the frame
+     * length, not from power; and on this driver CALLING set_max_tx_power is
+     * itself what REDUCES the power - left alone the driver reports 78, and
+     * immediately after writing 78 it reports back 58-59 (14.7 dBm). That is
+     * 4.8 dB, about 3x in power, lost by the act of asking for it.
+     * svc_wicoll.c's apply_tx_power() reads first and only writes when the
+     * value is genuinely low, which is the correct pattern. This call has
+     * not been changed here because the deauth attack was out of scope for
+     * the collateral work, but it is 4.8 dB on the table and should be
+     * changed to the read-first form. */
+    esp_wifi_set_max_tx_power(78);
     int ch = tgt_wifi_channel();
     if (ch < 1)
         ch = 1;

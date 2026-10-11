@@ -46,8 +46,14 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hk_test import Dev, POS  # noqa: E402
 
-TARGET_SSID = "JioFiber"
+TARGET_SSID = os.environ.get("HK_TARGET_SSID", "JioFiber")
 POLL = 0.4
+
+# Attack mode index on the WiFi attacks screen. 4 = PowerKill, 5 = CSAonly.
+# The two matter separately against a PMF client: deauth is expected to be
+# ignored there, so CSAonly is the mode that can actually work.
+MODE_POWERKILL = 4
+MODE_CSAONLY = 5
 
 # Cloudflare's __down endpoint silently returns a 1-byte body once you ask for
 # more than ~20 MB, which looks like an instant download rather than an error.
@@ -95,8 +101,11 @@ class VictimWatcher:
     """Samples the adapter; classifies every transition and tracks how much
     time the client actually spent on the target."""
 
-    def __init__(self, target=TARGET_SSID):
+    def __init__(self, target=TARGET_SSID, phased=True):
         self.target = target
+        # CSAonly never escalates, so labelling its events "phase A/B" would
+        # be meaningless - and a misleading label is worse than none.
+        self.phased = phased
         self.t0 = time.time()
         self.t_launch = None    # set by mark_launch()
         self.last_known = None   # (ssid, band, channel), survives a drop
@@ -165,14 +174,19 @@ class VictimWatcher:
         print("  (launch stamped at T+%.1fs; phase A runs 0-20s, "
               "phase B after)" % self.t_launch, flush=True)
 
+    def _since_label(self, t):
+        if self.t_launch is None:
+            return ""
+        since = t - self.t_launch
+        if not self.phased:
+            return "  [T+%.1fs into attack]" % since
+        return "  [T+%.1fs into attack, %s]" % (
+            since, "phase A" if since < 20 else "phase B")
+
     def _note(self, t, kind, detail):
         self.events.append((t, kind, detail))
-        rel = ""
-        if self.t_launch is not None:
-            since = t - self.t_launch
-            rel = "  [T+%.1fs into attack%s]" % (
-                since, ", phase A" if since < 20 else ", phase B")
-        print("  T+%6.1fs  %-18s %s%s" % (t, kind, detail, rel), flush=True)
+        print("  T+%6.1fs  %-18s %s%s"
+              % (t, kind, detail, self._since_label(t)), flush=True)
 
     def report(self, label):
         pct = 100.0 * self.on_target / self.samples if self.samples else 0.0
@@ -183,12 +197,8 @@ class VictimWatcher:
         rate = span / self.samples if self.samples else 0
         print("\n== %s ==" % label)
         for t, kind, detail in self.events:
-            rel = ""
-            if self.t_launch is not None:
-                since = t - self.t_launch
-                rel = "  [T+%.1fs into attack%s]" % (
-                    since, ", phase A" if since < 20 else ", phase B")
-            print("  T+%6.1fs  %-18s %s%s" % (t, kind, detail, rel))
+            print("  T+%6.1fs  %-18s %s%s" % (t, kind, detail,
+                                             self._since_label(t)))
         if not self.events:
             print("  (no link change at all)")
         print("  time on target : %.1f%%  (%d/%d samples)"
@@ -207,23 +217,31 @@ def main():
     load = "--load" in sys.argv
     port = args[0] if args else "COM5"
     run_s = int(args[1]) if len(args) > 1 else 60
+    # --mode N picks the attack; --ssid NAME overrides the target.
+    mode = MODE_POWERKILL
+    if "--mode" in sys.argv:
+        mode = int(sys.argv[sys.argv.index("--mode") + 1])
+    ssid = TARGET_SSID
+    if "--ssid" in sys.argv:
+        ssid = sys.argv[sys.argv.index("--ssid") + 1]
+    mode_name = "CSAonly" if mode == MODE_CSAONLY else "PowerKill"
 
     st = wifi_state()
     if not st or not st[0]:
         print("laptop is not on WiFi - connect first", file=sys.stderr)
         return 2
-    if st[1] != TARGET_SSID or st[2] != "2.4 GHz":
+    if st[1] != ssid or st[2] != "2.4 GHz":
         print("laptop is on %s / %s, not %s on 2.4 GHz. Reconnect:\n"
               '  netsh wlan connect name="%s"'
-              % (st[1] or "?", st[2] or "?", TARGET_SSID, TARGET_SSID),
+              % (st[1] or "?", st[2] or "?", ssid, ssid),
               file=sys.stderr)
         return 2
-    print("victim: %s %s ch%s   mode=%s load=%s"
+    print("victim: %s %s ch%s   mode=%s/%s load=%s"
           % (st[1], st[2], st[3], "CONTROL" if control else "ATTACK",
-             "on" if load else "off"), flush=True)
+             mode_name, "on" if load else "off"), flush=True)
 
     d = Dev(port, 460800)
-    w = VictimWatcher()
+    w = VictimWatcher(target=ssid, phased=(mode == MODE_POWERKILL))
 
     cur = [0, 0]
 
@@ -253,7 +271,7 @@ def main():
     d.key("d")
     d.pump(1.0)
 
-    print("== WiFi attacks -> PowerKill ==", flush=True)
+    print("== WiFi attacks -> %s (mode %d) ==" % (mode_name, mode), flush=True)
     d.key("b")
     d.pump(0.6)
     d.key("b")
@@ -263,9 +281,13 @@ def main():
     d.pump(0.4)
     d.key("e")
     d.pump(1.5)
-    for _ in range(4):
+    for _ in range(mode):
         d.key("s")
     d.pump(0.8)
+    shot = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "test_out", "victim_%s_mode.png" % mode_name)
+    d.shot(shot)
+    print("  armed: %s" % shot, flush=True)
 
     dl = None
     if load:
@@ -289,7 +311,7 @@ def main():
             w.poll()
             d.pump(POLL)
     else:
-        print("== LAUNCH PowerKill, watching victim ==", flush=True)
+        print("== LAUNCH %s, watching victim ==" % mode_name, flush=True)
         w.mark_launch()
         d.key("e")
         t0 = time.time()
@@ -310,7 +332,7 @@ def main():
         dl.terminate()
         print("== load stopped ==", flush=True)
 
-    pct = w.report("CONTROL (no attack)" if control else "ATTACK (PowerKill)")
+    pct = w.report("%s (%s)" % ("CONTROL" if control else "ATTACK", mode_name))
     if control:
         print("\nSave this number. The attack run's time-on-target must be "
               "compared against it - a single disconnect means nothing "

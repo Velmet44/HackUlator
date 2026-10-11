@@ -1,6 +1,8 @@
 #include "app_config.h"
 #include "caster.h"
 #include "hal_oled.h"
+#include "oled_gfx.h"
+#include "font_oled.h"
 #include "hal_input.h"
 #include "ui_calc.h"
 #include "ui_menu.h"
@@ -18,6 +20,8 @@
 #include "ui_bleadv.h"
 #include "ui_wifipassive.h"
 #include "ui_survey.h"
+#include "ui_wicoll.h"
+#include "svc_wicoll.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
@@ -40,19 +44,132 @@ typedef enum {
     SCR_BLEPASSIVE,
     SCR_BLEADV,
     SCR_SURVEY,
+    SCR_WICOLL,
 } screen_t;
 
 static const char *MENU_ITEMS[] = {
     "WiFi scan", "BLE scan", "WiFi attacks", "BLE attacks",
-    "WiFi passive", "BLE passive", "Channel survey",
+    "WiFi passive", "BLE passive", "Channel survey", "Collateral",
 };
-#define MENU_N 7
+#define MENU_N 8
 
 static int64_t s_last_atk_tick = 0; /* live-attack status repaint (ms) */
 static int64_t s_last_sniff_tick = 0; /* passive counter repaint (ms) */
 
+/* "Direct" mode: the calculator disguise is off and the device goes straight
+ * to the menu. Toggled by holding the module's BOOT button (GPIO0) for
+ * ONEBTN_HOLD_MS, delivered as KEY_ONEBTN.
+ *
+ * RAM only, deliberately - a reboot always comes back disguised, so this can
+ * never be left on by accident and it is not a stored setting an attacker
+ * (or a passer-by) could find and re-arm. */
+static int s_direct = 0;
+
+static void show_menu(void); /* used by go_home() below */
+
+/* How long the one-button confirmation stays on screen before the home
+ * screen is repainted. Long enough to read, short enough that it never feels
+ * like the device has locked up. */
+#define DIRECT_NOTICE_MS 1500
+
+/* Confirm the mode actually changed. Removing the disguise is a silent,
+ * large change to how the device looks - without this the operator has no
+ * way to tell a mode they enabled from a broken screen.
+ *
+ * The wording is one-sided on purpose: the mode can only be entered, so
+ * "OFF" is not a state this device can reach and must not be advertised.
+ *
+ * Transient: it paints over the home screen, so something has to put the
+ * home screen back afterwards or the device sits on a dead message with no
+ * visible way out. s_notice_until drives that; a keypress also clears it. */
+static int64_t s_notice_until = 0;
+
+static void direct_notice(void) {
+    oled_fb_t *fb = hal_oled_fb();
+    oled_clear(fb, 0);
+    const char *l1 = "DIRECT MODE ON";
+    const char *l2 = "reboot to restore";
+    int w1 = oled_text_w(&oled_font, l1);
+    oled_text(fb, &oled_font, (OLED_W - w1) / 2, 22, l1, 1);
+    int w2 = oled_text_w(&oled_font, l2);
+    oled_text(fb, &oled_font, (OLED_W - w2) / 2, 36, l2, 1);
+    hal_oled_flush_all();
+    s_notice_until = esp_timer_get_time() + DIRECT_NOTICE_MS * 1000;
+}
+
+/* Repaint whichever home screen the current mode owns. */
+static void redraw_home(void) {
+    if (s_direct) {
+        show_menu();
+    } else {
+        ui_calc_enter();
+    }
+}
+
+/* Full teardown back to a stopped, radio-free state. The ORDER matters:
+ * every TX timer and RX callback must die before the driver underneath them
+ * goes away, or the next bring-up faults. See enter_menu_item(). */
+static void teardown_radios(void) {
+    svc_deauth_stop();
+    wicoll_stop();
+    svc_sniff_stop();
+    svc_ble_passive_stop();
+    svc_wifi_teardown();
+    svc_ble_stop();
+    ui_wifiscan_drop(); /* free scan lists so the next bring-up gets the block */
+    ui_blescan_drop();
+}
+
+/* Return to the home screen for the current mode, with every radio stopped.
+ *
+ * `unlocked` is derived, not chosen: in direct mode the home screen IS the
+ * menu, so the device must stay unlocked or the key loop would keep handing
+ * presses to ui_calc_key() while the menu is on the display. Getting that
+ * pairing wrong is silent - no crash, just a menu that ignores the keypad. */
+static void go_home(int *unlocked, screen_t *screen) {
+    teardown_radios();
+    *screen = s_direct ? SCR_MENU : SCR_CALC;
+    *unlocked = s_direct;
+    /* Keep the input layer in step. In one-button mode it refuses the six
+     * keys and the caster arrows and turns the one button into taps - so this
+     * call is what makes the mode actually take effect. */
+    hacku_input_set_onebutton(s_direct);
+    if (s_direct) {
+        show_menu();
+    } else {
+        ui_calc_enter();
+    }
+}
+
 static void show_menu(void) {
     ui_menu_enter("HACKULATOR", MENU_ITEMS, MENU_N);
+}
+
+/* Fill a bar along the bottom while the one button is held.
+ *
+ * Purely feedback, and deliberately so: it is the only thing that
+ * distinguishes "the hold is counting" from "this pin is not wired to
+ * anything", which look identical from the outside. Costs one bar's worth of
+ * pixels and no state. Returns 1 while it drew, so the caller can skip its
+ * own repaint and the bar does not flash. */
+static int draw_hold_progress(void) {
+    int held = hacku_input_onebtn_held_ms();
+    if (held <= 0) {
+        return 0;
+    }
+    oled_fb_t *fb = hal_oled_fb();
+    int total = hacku_input_onebtn_hold_target_ms();
+    int w = (int)((int64_t)OLED_W * held / (total > 0 ? total : 1));
+    if (w < 1) {
+        w = 1;
+    }
+    if (w > OLED_W) {
+        w = OLED_W;
+    }
+    int y = OLED_H - 2;
+    oled_fill_rect(fb, 0, y - 1, w, 2, 1);
+    hal_oled_flush_all();
+    return 1;
 }
 
 /* Guard menu selection: drop the deauth TX timer AND the promiscuous RX
@@ -128,6 +245,20 @@ static int enter_menu_item(int sel, screen_t *screen_out) {
         ui_survey_run();
         return 1;
     }
+    if (sel == 7) {                       /* collateral */
+        /* Guard every radio owner before ANY teardown or transition. The TX
+         * task points into the WiFi driver, so it must be gone first - same
+         * reason the deauth timer and the promiscuous callback are stopped
+         * above. */
+        svc_deauth_stop();
+        wicoll_stop();
+        svc_sniff_stop();
+        svc_ble_passive_stop();
+        svc_ble_stop();
+        *screen_out = SCR_WICOLL;
+        ui_wicoll_run();
+        return 1;
+    }
     return 0;
 }
 
@@ -175,10 +306,19 @@ void app_main(void) {
             ui_blescan_run();
         }
         last_activity = esp_timer_get_time();
+    } else if (s_direct) {
+        /* Disguise off: straight to the menu, no calculator. s_direct is
+         * RAM-only and defaults to 0, so this is unreachable at first boot -
+         * a fresh boot is always disguised. */
+        unlocked = 1;
+        screen = SCR_MENU;
+        show_menu();
+        last_activity = esp_timer_get_time();
     } else {
         ui_calc_enter();
     }
-    ESP_LOGI(TAG, "boot: calculator%s", has_oled ? " (OLED)" : " (caster)");
+    ESP_LOGI(TAG, "boot: %s%s", s_direct ? "direct menu" : "calculator",
+             has_oled ? " (OLED)" : " (caster)");
 
     hacku_key_t k;
     for (;;) {
@@ -186,19 +326,49 @@ void app_main(void) {
             last_activity = esp_timer_get_time();
             if (k == KEY_RELOCK) {
                 if (unlocked) {
-                    unlocked = 0;
-                    screen = SCR_CALC;
-                    svc_deauth_stop(); /* TX timer must die before radio */
-                    svc_sniff_stop();  /* RX callback must die before radio */
-                    svc_ble_passive_stop(); /* BT scan must die before radio */
-                    svc_wifi_teardown(); /* radios off + heap freed */
-                    svc_ble_stop();
-                    ui_wifiscan_drop(); /* free scan lists so the next
-                                         * bring-up gets the block back */
-                    ui_blescan_drop();
-                    ui_calc_enter();
+                    go_home(&unlocked, &screen);
                 }
                 continue;
+            }
+            if (k == KEY_ONEBTN_HOLD) {
+                /* ONE WAY. This can enter the mode and never leave it; a
+                 * reboot is the only way back to the calculator.
+                 *
+                 * That is deliberate, and it is also the safety property. The
+                 * disguise is what the device is for; a single mis-fired
+                 * long press used to put it back on screen, which is the one
+                 * outcome the operator cannot afford on a device that is
+                 * supposed to look like a calculator. With the mode one-way,
+                 * every press either advances or does nothing - there is no
+                 * path that re-reveals it by accident.
+                 *
+                 * Reachable from BOTH home screens. This used to require
+                 * SCR_MENU, which made the gesture unreachable from a cold
+                 * boot: a disguised device sits on SCR_CALC, so the hold fell
+                 * into the "go home" branch and just re-drew the calculator.
+                 * Nothing appeared to happen - and the suite passed anyway,
+                 * because every check ran from the menu, the one screen where
+                 * the bug is invisible. */
+                if (!s_direct) {
+                    s_direct = 1;
+                    ESP_LOGI(TAG, "one-button: direct ON (one-way, "
+                                  "reboot to restore)");
+                    go_home(&unlocked, &screen);
+                    direct_notice();
+                } else {
+                    /* Already on. The hold must NOT disarm the disguise. It
+                     * is still the escape hatch out of whatever screen we
+                     * are in - which tears down any running attack - and on
+                     * the menu it is simply a harmless redraw. */
+                    go_home(&unlocked, &screen);
+                }
+                continue;
+            }
+            /* Any real key dismisses the confirmation immediately, so an
+             * impatient operator is never stuck looking at a dead message. */
+            if (s_notice_until) {
+                s_notice_until = 0;
+                redraw_home();
             }
             if (!unlocked) {
                 if (ui_calc_key(k) == ACT_UNLOCK) {
@@ -285,9 +455,25 @@ void app_main(void) {
                     screen = SCR_BLEPASSIVE;
                     ui_blepassive_run();
                 }
+            } else if (screen == SCR_WICOLL) {
+                if (ui_wicoll_key(k)) {
+                    screen = SCR_MENU;
+                    show_menu();
+                }
             }
         }
         hal_oled_caster_poll(); /* skipped-frame catch-up + self-heal */
+        /* One-button hold progress. Only from the home screens, where a hold
+         * actually does something - drawing it inside a submenu would
+         * promise feedback for a gesture that means "go back" instead. */
+        if (screen == SCR_CALC || screen == SCR_MENU) {
+            draw_hold_progress();
+        }
+        /* One-button confirmation expires back to the home screen. */
+        if (s_notice_until && esp_timer_get_time() >= s_notice_until) {
+            s_notice_until = 0;
+            redraw_home();
+        }
         /* Live status for a running attack (paced, cheap, OLED+caster). */
         if (screen == SCR_WIFIATK || screen == SCR_BLEATK) {
             int64_t now_ms = esp_timer_get_time() / 1000;
@@ -306,18 +492,19 @@ void app_main(void) {
                 ui_bleadv_tick();
             }
         }
+        /* Live counters for a running collateral attack. Its own tick also
+         * honours the auto-stop flag, so it must be on the same 500 ms
+         * cadence as the other live screens. */
+        if (screen == SCR_WICOLL) {
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            if (now_ms - s_last_atk_tick >= 500) {
+                s_last_atk_tick = now_ms;
+                ui_wicoll_tick();
+            }
+        }
         if (unlocked &&
             esp_timer_get_time() - last_activity > (int64_t)IDLE_RELOCK_MS * 1000) {
-            unlocked = 0;
-            screen = SCR_CALC;
-            svc_deauth_stop();
-            svc_sniff_stop();
-            svc_ble_passive_stop();
-            svc_wifi_teardown();
-            svc_ble_stop();
-            ui_wifiscan_drop();
-            ui_blescan_drop();
-            ui_calc_enter();
+            go_home(&unlocked, &screen);
         }
         vTaskDelay(pdMS_TO_TICKS(20));
     }

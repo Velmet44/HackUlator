@@ -210,9 +210,155 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   identifiable).
 * `hal_oled.*` (1KB static mono page FB, SSD1306+caster flush),
   `hal_input.*`
-  (6 buttons + caster keys, `KEY_RELOCK` on OK+BACK hold / 3x BACK),
+  (6 buttons + caster keys, `KEY_RELOCK` on OK+BACK hold / 3x BACK,
+  (`KEY_ONEBTN` tap / `KEY_ONEBTN_HOLD` 3 s hold, GPIO0 + caster space/x)),
   `caster.*` (PKC rect protocol, mono expanded to RGB565 white/black),
   `oled_gfx.*`, `font_oled.h` (generated via `tools/gen_font.py`, don't edit).
+* **"Direct mode" (`main.c`) removes the calculator disguise AND the other
+  six keys, ONE WAY.** `s_direct` makes the device boot and idle straight to
+  the menu with a single input: the module's own BOOT button on GPIO0, or the
+  caster's **spacebar**. A 3 s hold (`ONEBTN_HOLD_MS` = 3000) enters it
+  **once**; **only a reboot brings the calculator back**. There is deliberately
+  no gesture that exits it. `hacku_input_set_onebutton()` is the only thing
+  that switches the HAL over, and `go_home()` owns calling it, so the mode and
+  the input layer can never disagree about which keys are alive.
+  - **Why one-way.** The disguise is the whole point of the device, and a
+    single mis-fired long press must never put a calculator back on screen.
+    Every press either advances or does nothing; no input path re-reveals the
+    disguise by accident. RAM-only already guaranteed a reboot clears it —
+    this removes the in-session path too.
+  - **RAM-only, deliberately.** A reboot always comes back disguised. Do not
+    move it to NVS or RTC NOINIT — `svc_resume.c` already owns RTC NOINIT.
+  - **`unlocked` is derived, not chosen.** `go_home()` sets
+    `unlocked = s_direct`. Zeroing it while the menu is on screen is
+    *silent*: the key loop hands presses to `ui_calc_key()` and the menu
+    ignores the keypad — no crash, no log. Same class of bug as the
+    collateral profile desync.
+  - **The six keys are refused in the HAL, not by the UI.** One button has
+    to express three actions, so it speaks in taps
+    (`ONEBTN_TAP_WINDOW_MS` = 400): **1 tap = DOWN, 2 = OK, 3 = BACK**. The
+    HAL synthesises those normal keys, so no screen needed rewriting — which
+    is the only reason this stayed a small change. A tap is emitted when the
+    window *closes*, not on release, so one gesture delivers one key instead
+    of a DOWN that is corrected a moment later. Every action costs up to
+    400 ms; that is the price of not having four more buttons.
+  - **The caster cannot express a hold, so tap and hold are different
+    bytes.** Space is `KEY_ONEBTN` (a tap) and `x` is `KEY_ONEBTN_HOLD`.
+    Merging them made `x` increment a tap counter, so a remote long press
+    could *never* reach the toggle — and the check still went green, because
+    it was measuring a screen the press was not supposed to change. A test
+    that passes on the wrong screen is worse than no test.
+  - **The 3 s hold must be reachable from BOTH home screens.** It is how
+    one-button mode is entered in the first place. Gating it on `SCR_MENU`
+    alone made the gesture dead on a cold boot — a disguised device sits on
+    `SCR_CALC`, so the hold fell into "go home" and just re-drew the
+    calculator. Nothing appeared to happen, and the whole test suite passed
+    anyway (14/14) because every check started from the menu, the one screen
+    where the bug cannot show. **Always test an entry path from the state a
+    user is actually in when they first touch it.** Inside any other screen
+    the hold is still the escape hatch ("go home", tearing down any running
+    attack) — it just cannot change modes.
+  - **A held caster key is auto-repeat, not a burst of taps.** Holding
+    spacebar delivers ~30 bytes/second; the tap counter hit 3 instantly,
+    fired `KEY_BACK`, reset, and repeated — "sort of spams it", and the hold
+    never completed. Bytes closer together than `ONEBTN_REPEAT_GAP_MS`
+    (90 ms) are now one continuous press; the first repeat cancels any
+    pending tap run so a tap-then-hold cannot deliver a phantom `KEY_OK`.
+    `hacku_viewer.py` also suppresses repeat for these keys at the source.
+  - **A toggle must be driven by a COMPLETED hold, never by the start of
+    one.** The first version pushed the toggle on the *first* byte of a
+    press. Auto-repeat has gaps longer than the repeat threshold all the
+    time, every gap cleared the burst, and the next byte then looked like a
+    fresh press and toggled again — measured: one 8 s hold toggled at 3.6 s,
+    5.5 s and again after the test ended, finishing exactly where it
+    started. Space now means the same in both modes: a tap only navigates
+    (and only in one-button mode, where there is a cursor to move); the
+    disguise toggles on a completed 3 s hold. Identical to the physical
+    button, which is the point.
+  - **Keep the tap window and the repeat gap far apart.** They were 400 ms
+    and 120 ms, so taps 120 ms apart — an ordinary double-tap — were
+    classified as a held press, their tap runs were cancelled, and the
+    2-tap/3-tap gestures silently did nothing. They are now 500 ms and
+    90 ms, which clears a ~200 ms human double-tap on both sides.
+  - **The HAL must be able to emit UP.** It originally produced only
+    DOWN/OK/BACK, so every list in the UI was one-way and reaching an earlier
+    row meant cycling the whole list the long way round — worst on the scan
+    lists, which are long. The hold was free once the mode went one-way (the
+    toggle is only needed to get IN), so it became `KEY_UP` at
+    `ONEBTN_UP_HOLD_MS` = 700. Shorter than the 3 s entry hold on purpose:
+    that one is deliberately hard to trigger by accident and cannot be undone,
+    while "up" is used constantly. `hacku_input_onebtn_hold_target_ms()` is
+    what the progress bar divides by, so the bar always fills to the moment
+    the gesture actually fires.
+  - **Lists wrap, and this was not true everywhere.** Five of the seven lists
+    cycle (`(s_sel + 1) % n`); `ui_wifiscan.c` and `ui_blescan.c` clamped at
+    both ends (`if (s_sel > 0)` / `if (s_sel + 1 < s_count)`). With no UP
+    gesture that made the two scan lists strictly downward-only. Both wrap now,
+    and `s_top` is corrected for the wrap in both directions. **When adding a
+    list, wrap it** — a clamped list is a trap once one button has to drive it.
+  - **The hold draws a filling bar** (`draw_hold_progress()`, home screens
+    only). That bar is the only thing that separates "counting down" from
+    "this pin is not wired to anything" — a dead button and a working one look
+    identical from the outside. It is why a real wiring fault is now
+    diagnosable in one press instead of by argument.
+  - **The confirmation must be transient.** `direct_notice()` paints over
+    the home screen; `s_notice_until` repaints ~1.5 s later and any keypress
+    clears it early. Without the repaint, toggling OFF leaves the device
+    sitting on a dead message.
+  - **GPIO0 is a strap pin.** Configure it as a plain input AFTER boot;
+    holding it low at reset drops the chip into the download bootloader, so
+    it must not decide anything during startup.
+  - `hacku_input_set_onebutton()` is the only thing that switches the HAL
+    over, and `go_home()` owns calling it, so the mode and the input layer
+    can never disagree about which keys are alive.
+* **`svc_wicoll.*` / `ui_wicoll.*` — "Collateral" (menu item 8)**, wideband
+  2.4 GHz jamming on the WiFi radio, profiled as BLE / Classic BT / WiFi.
+  Full provenance in the `svc_wicoll.h` header; the parts that bite:
+  - **The UI's profile and the service's profile were separate, and that
+    killed the device.** `wicoll_mode_at()` (used to turn a pressed row into
+    a mode) reads the profile held in `svc_wicoll`, while `wicoll_start()`
+    took the UI's. Selecting WiFi before ever running one left the service on
+    BLE, so WiFi row 4 resolved to `DISCOVER` and
+    `CFG[WiFi][DISCOVER]` is `{NULL, 0, NULL}` — `tx_task` fell through to
+    the sweep branch and dereferenced `c->ch[0]`. Measured: `LoadProhibited`,
+    `A0 = 0`. The UI now calls **`wicoll_set_profile()`** on every change,
+    and `wicoll_start()` **refuses (`-8`) a mode the profile does not offer**.
+  - **LOCK surveys now.** It used to park on `pinned_ch`, i.e. channel 1
+    unless something else set it — so the one mode that is supposed to be
+    precise was the one attacking a fixed guess. `run_lock_survey()` picks
+    the busiest channel that carried a **beacon**; the beacon filter is what
+    stops a transient data burst on an otherwise empty channel from winning.
+    Aims and AP-channel count are shown on screen (`aim ch1 of 3 AP ch`) —
+    a survey result that is not displayed cannot be told apart from a guess.
+  - **MEASURED on a victim, 60 cm, AP on ch1, 3 paired 15 s windows:**
+    p50 36-48 ms -> 122-146 ms (**3.4x**), p90 68 -> 383 ms (5.6x), loss
+    0.0% -> 3.8%. But the same build gave 3.54x at **10 cm**, and 6x the
+    distance changed nothing — which is not how a power-limited jammer
+    behaves, and is unexplained. The victim's RSSI is only a percentage, so
+    the C/I was never actually measured. Do not quote a range from this.
+  - **WiFi mode ranking, measured the same way (jam p50, control band
+    36-48 ms):** Lock **110.7** (n=3, 87-141, 4.2% loss), Sweep 68.3 (n=3,
+    66-71), Full 63.0 (n=4), All 53.0 (n=3), Hot 51.5 (n=4), Burst 46.7
+    (n=3). **Only Lock clearly beats the control band, and it is the only
+    mode that ever produced packet loss.** That is the expected ordering and
+    it is the whole argument for concentrating duty: Full/Hot/Burst/All
+    spread airtime over 4 or 13 channels, so the victim's single channel
+    gets a fraction of it and the result is indistinguishable from noise.
+    Lock is the mode to reach for against one known AP.
+  - **The ranking above supersedes the old one**, which was taken on the
+    build that could panic mid-run; see the profile desync note above. It is
+    still only 3-4 windows per mode — good enough to separate Lock from the
+    rest, not enough to rank the middle four against each other.
+  - **The control link is noisy**: one control window produced a 694 ms
+    outlier on a 35 ms median. Only distributions are meaningful here; a
+    mean over a handful of samples on this link is noise.
+  - **`Duration/ID` was A/B'd and made no detectable difference** (max NAV
+    vs zero, 3 windows each, distributions overlapping). The degradation is
+    raw energy on the channel, not virtual carrier sense. Kept at zero.
+  - **Do not call `esp_wifi_set_max_tx_power(78)`** — on this driver the call
+    itself drops the reported power to 58-59 (14.7 dBm) from 78 (19.5 dBm).
+    `svc_wicoll`'s `apply_tx_power()` reads first and writes only if low.
+    `svc_deauth.c` still calls it and is losing that 4.8 dB.
 
 ## Hard constraints
 

@@ -47,6 +47,17 @@ KEYMAP = {
     "Return": "e", "KP_Enter": "e", "Escape": "b",
     "w": "w", "a": "a", "s": "s", "d": "d", "e": "e", "b": "b",
     "W": "w", "A": "a", "S": "s", "D": "d", "E": "e", "B": "b",
+    # Space is the one button: a tap navigates (one-button mode), a 3 s hold
+    # toggles the disguise. 'x' is an explicit long press for clients that
+    # cannot hold a key.
+    #
+    # DELIBERATELY NOT repeat-suppressed. An earlier version dropped repeats
+    # here to stop spacebar "spamming" - which also meant a held spacebar sent
+    # exactly one byte, so the hold could never complete and the feature the
+    # viewer was added for did not work at all. The spam belongs in the
+    # device, which can tell a tight burst from real taps; the viewer cannot.
+    "space": " ", "KP_Space": " ", " ": " ",
+    "x": "x", "X": "x",
 }
 
 
@@ -375,13 +386,14 @@ def run_viewer(port=None, baud=460800, echo_log=True, no_reset=False,
 
     def on_key(ev):
         ch = KEYMAP.get(ev.keysym)
-        if ch:
-            try:
-                ser.write(ch.encode())
-                stats["last_key"] = ev.keysym
-                print("\r[key] %-8s sent to %s  " % (ev.keysym, port), flush=True)
-            except Exception as e:
-                print("\r[key] send failed: %r" % e, file=sys.stderr, flush=True)
+        if not ch:
+            return
+        try:
+            ser.write(ch.encode())
+            stats["last_key"] = ev.keysym
+            print("\r[key] %-8s sent to %s  " % (ev.keysym, port), flush=True)
+        except Exception as e:
+            print("\r[key] send failed: %r" % e, file=sys.stderr, flush=True)
 
     root.bind("<KeyPress>", on_key)
     root.bind("<Button-1>", lambda e: root.focus_set())

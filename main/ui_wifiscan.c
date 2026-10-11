@@ -468,18 +468,26 @@ int ui_wifiscan_key(hacku_key_t k) {
     }
     switch (k) {
         case KEY_UP:
-            if (s_sel > 0) {
-                s_sel--;
+            if (s_count > 0) {
+                /* Wraps, like every other list in this UI. It used to stop
+                 * at s_sel == 0, which made this the only list you could not
+                 * cycle - and with one-button mode there is no UP at all, so a
+                 * scan list was strictly one-way. */
+                s_sel = (s_sel + s_count - 1) % s_count;
                 if (s_sel < s_top) {
                     s_top = s_sel;
+                } else if (s_sel >= s_top + ROWS) {
+                    s_top = s_sel - ROWS + 1;
                 }
                 draw_list();
             }
             return 0;
         case KEY_DOWN:
-            if (s_sel + 1 < s_count) {
-                s_sel++;
-                if (s_sel >= s_top + ROWS) {
+            if (s_count > 0) {
+                s_sel = (s_sel + 1) % s_count;
+                if (s_sel < s_top) {
+                    s_top = s_sel;              /* wrapped past the top */
+                } else if (s_sel >= s_top + ROWS) {
                     s_top = s_sel - ROWS + 1;
                 }
                 draw_list();
