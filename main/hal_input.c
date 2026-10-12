@@ -18,6 +18,11 @@ static const hacku_key_t s_btn_keys[6] = {
     KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_OK, KEY_BACK,
 };
 
+/* Pins currently borrowed by a peripheral (see hal_input.h). Owned here,
+ * written by whoever borrows the pin - currently only svc_nrf - and read
+ * every poll, never latched, so it can be changed while keys are held. */
+static uint32_t s_btn_mask;
+
 #define POLL_MS           15
 #define DEBOUNCE_SAMPLES  3
 /* Remote (caster) keys have no release edge: treat as held this long. */
@@ -244,6 +249,15 @@ static void input_task(void *arg) {
         /* Physical buttons, debounced. */
         int onebtn = s_onebtn;
         for (int i = 0; i < 6; i++) {
+            /* A masked pin belongs to a peripheral. Report it permanently
+             * released AND keep raw[]/prev[] in step, so unmasking later
+             * cannot replay an edge that happened while it was masked. */
+            if (s_btn_mask & (1ULL << s_btn_pins[i])) {
+                raw[i] = 1;
+                cnt[i] = 0;
+                prev[i] = 1;
+                continue;
+            }
             uint8_t lvl = (uint8_t)gpio_get_level(s_btn_pins[i]);
             if (lvl == raw[i]) {
                 if (cnt[i] < DEBOUNCE_SAMPLES)
@@ -443,6 +457,15 @@ void hacku_input_init(void) {
              ONEBTN_HOLD_MS);
     xTaskCreatePinnedToCore(input_task, "hk_input", 4096, NULL, 10, NULL,
                             tskNO_AFFINITY);
+}
+
+void hacku_input_set_button_mask(uint32_t pin_mask) {
+    s_btn_mask = pin_mask;
+    ESP_LOGI(TAG, "button mask = 0x%08lx", (unsigned long)pin_mask);
+}
+
+uint32_t hacku_input_button_mask(void) {
+    return s_btn_mask;
 }
 
 int hacku_input_get(hacku_key_t *out) {

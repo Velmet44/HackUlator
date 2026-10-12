@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 /* Unified key input: 6 physical buttons (internal pull-ups, active low)
  * merged with remote single-byte keys from the caster RX queue, plus the
  * module's own BOOT button on GPIO0 as a long-press gesture.
@@ -127,6 +129,30 @@ int hacku_input_onebtn_held_ms(void);
 int hacku_input_onebtn_hold_target_ms(void);
 
 void hacku_input_init(void);
+
+/* Stop sampling the physical buttons on these pins. `mask` is a pin
+ * bitmask built from (1UL << PIN_x) - not a key index and not a button
+ * number, because what has to be excluded is a PIN, and the whole point is
+ * that one pin is two things at once.
+ *
+ * WHY THIS EXISTS: the nRF24L01 spectrum analyser needs CSN on GPIO14 and CE
+ * on GPIO26, which are this keypad's OK and RIGHT buttons. Left polling, two
+ * separate things break at once. The pin is reconfigured as an output by the
+ * analyser, so gpio_get_level() on it returns the output latch - which makes
+ * the button read as permanently released. And a physical press would tie a
+ * driven output to ground, which both spikes current through the button and
+ * holds CSN low, and a radio that is still selected merges every following
+ * SPI transaction into one garbage frame.
+ *
+ * A masked button is treated as held-and-released throughout, so removing it
+ * from the mask later cannot replay an edge that happened while it was
+ * masked. Remote (caster) keys are NOT affected: they arrive on UART0 and
+ * are unrelated to these pins, which is how the analyser keeps its OK key.
+ */
+void hacku_input_set_button_mask(uint32_t pin_mask);
+
+/* Current mask, as a pin bitmask. */
+uint32_t hacku_input_button_mask(void);
 
 /* Non-blocking drain: returns 1 and fills *out when a key event is pending. */
 int hacku_input_get(hacku_key_t *out);

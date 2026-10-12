@@ -34,6 +34,45 @@
  * anything during startup. */
 #define PIN_BTN_ONE         0
 
+/* ---- 2.4 GHz spectrum analyser: nRF24L01+ ----
+ * MOSI/MISO/SCK are 23/19/18, which are the classic ESP32's SPI3 (VSPI)
+ * IO_MUX pins, so this runs at native speed rather than through the GPIO
+ * matrix. Wiring the nRF to HSPI's 13/12/14 instead would halve it.
+ *
+ * ============================ READ THIS FIRST ============================
+ * CSN = 14 and CE = 26 ARE PIN_BTN_OK and PIN_BTN_RIGHT. Those two buttons
+ * are electrically repurposed by the analyser and the board cannot have
+ * both. Consequences, all handled in code but none of them free:
+ *
+ *   - hacku_input_init() makes GPIO14 an INPUT with a pull-up at boot. The
+ *     radio would then be deselected for ever, so svc_nrf_init() reclaims
+ *     the pin as an output before it uses the bus. This means the analyser
+ *     cannot be initialised until after hal_input_init(), and it must be
+ *     stopped before anything re-runs that init.
+ *   - GPIO14 and GPIO26 are put in a BUTTON MASK while the analyser screen
+ *     is live, so they are neither sampled as keys nor able to drag CSN to
+ *     ground mid-transaction. Those two buttons are inert on that screen -
+ *     physically unavoidable, since pressing OK would otherwise put the
+ *     output into a dead short through the button.
+ *   - The analyser still uses OK (cycle view) and RIGHT (sample count) -
+ *     via the caster, which is an independent path. On the six-key keypad
+ *     they simply do not exist while the screen is open.
+ *
+ * To fix this properly, move the nRF's CSN off 14 and its CE off 26 (or
+ * move the keypad's OK and RIGHT). Nothing in the code depends on these
+ * numbers beyond app_config.h.
+ * ======================================================================== */
+#define PIN_NRF_CE           26
+#define PIN_NRF_CSN          14
+#define PIN_NRF_MOSI         23
+#define PIN_NRF_MISO         19
+#define PIN_NRF_SCK          18
+
+/* Smallest largest-free-block that will accept an SPI3 bring-up. Below this
+ * the DMA descriptor allocation cannot be satisfied and the driver faults
+ * rather than failing, so the service refuses and says so. */
+#define NRF_MIN_HEAP_BYTES  (24 * 1024)
+
 /* ---- Caster: PKC wire protocol (compatible with pikachu viewer) ----
  * UART0 @ 460800 baud, shared with the USB console cable.
  * The OLED framebuffer is mono; the caster mirror expands it to RGB565

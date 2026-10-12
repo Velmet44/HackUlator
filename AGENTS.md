@@ -208,6 +208,10 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   counting adverts via `svc_ble_passive_*` (`BLE_SCAN_TYPE_PASSIVE` +
   random own address, so it never answers a SCAN_REQ and is not
   identifiable).
+* **`svc_nrf.*` / `ui_nrf.*`** — "2.4G spectrum" (menu item 10), the
+  external nRF24L01+ analyser. See the full note under Hard constraints; the
+  short version is that RPD is one bit, it is latched, and two of those GPIOs
+  are also keypad buttons.
 * `hal_oled.*` (1KB static mono page FB, SSD1306+caster flush),
   `hal_input.*`
   (6 buttons + caster keys, `KEY_RELOCK` on OK+BACK hold / 3x BACK,
@@ -421,6 +425,94 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   - **`tune_tables.h` and `tune_data.h` are generated** by
     `tools/gen_tunes.py` from `tunes/*.rtttl`. Never hand-edit, like
     `font_oled.h`.
+* **`svc_nrf.*` / `ui_nrf.*` — 2.4 GHz spectrum analyser (menu item 10)**,
+  an external nRF24L01+ on SPI3. Wired CE=26, CSN=14, MOSI=23, MISO=19,
+  SCK=18. Reference project: `ESP32-RF-Spectrum-Scanner`
+  (dkydivyansh, GPL-3.0); register-level behaviour cross-checked against
+  Nordic's datasheet and the `nRF24/RF24` driver source. Parts that bite:
+  - **NOT RUN ON HARDWARE YET.** The driver is register-correct and builds
+    clean, but no nRF24 has been attached. Treat the first on-device run as
+    bring-up, not as a regression test, and expect to fix pin or timing
+    details before trusting any trace.
+  - **RPD IS ONE BIT, NOT dBm.** The nRF24L01+ has no RSSI register. The
+    only power measurement it exposes is the Received Power Detector:
+    register **0x09 bit 0**, a single comparator bit that goes high above a
+    threshold (-64 dBm at 1/2 Mbps, -83 dBm at 250 kbps). A "level" here is
+    a **hit rate over repeated samples**, 0..`svc_nrf_samples()`. The screen
+    prints the scale (`hits 6/8`) and never labels the axis dBm. Labelling
+    it dBm would be inventing a number the chip never produced - the same
+    error class as presenting the sniff rate as absolute (see the RX
+    callback note above).
+  - **RPD IS LATCHED — this is the trap that decides whether the feature
+    works at all.** The status holds until a packet arrives or the host
+    pulls CE low. Reading it N times inside one RX period returns the SAME
+    bit N times, so the obvious "startListening() then loop N reads" shape
+    yields 0 or N and no gradation whatsoever — the reference project has
+    exactly this bug (10 "samples" that return 0 or 10). `svc_nrf_step()`
+    re-enters RX (CE low→high) before **every** sample and waits
+    Tstby2a+Tdelay_AGC = 130+40 us for the AGC. That is what turns one bit
+    into N+1 usable levels, and it is why a sweep costs ~190 us/sample.
+  - **Not STATUS bit 5.** Widely repeated online and wrong for this use.
+    `STATUS` (0x07) bit 5 is `TX_DS`; RPD is register 0x09 bit 0, confirmed
+    against `nRF24/RF24` (`nRF24L01.h`: `constexpr uint8_t RPD = 0x09`,
+    `testRPD()` → `read_register(RPD) & 1`). Using bit 5 reads TX_DS and
+    reports a transmit flag as RF power.
+  - **`EN_RXADDR` is a separate register (0x02), not CONFIG bits 6:7.** CONFIG
+    bits 6/5/4 are the IRQ masks. For a measurement receiver, `CONFIG_RX` is
+    `PRIM_RX | PWR_UP | MASK_MAX_RT | MASK_TX_DS | MASK_RX_DR` = **0x73**,
+    `EN_RXADDR` = `0x01` (RPD does not respond with every pipe disabled),
+    `RF_SETUP` = `LNA_HCURR` plus the data rate — LNA_HCURR is the difference
+    between a receiver that hears the band and one that does not.
+  - **CSN is driven BY HAND, and the pairing is load-bearing.** The device
+    config asks the driver for `spics_io_num = -1` because GPIO14 is not
+    SPI3's IO_MUX CS (that is GPIO5). Nothing else in the stack will ever
+    select the radio, so **every** bus access must be wrapped in
+    `cs_low()`/`cs_high()` inside `xfer2()`/`write_addr()`. An unpaired
+    access leaves the chip deselected for ever and every read returns the
+    bus idle value 0xFF — indistinguishable from an absent chip, so the
+    presence probe would fail for the wrong reason.
+  - **Two of the six buttons ARE the radio.** CSN=GPIO14 is `PIN_BTN_OK`
+    and CE=GPIO26 is `PIN_BTN_RIGHT`. Consequences, all real:
+    - `hacku_input_init()` makes GPIO14 an input with a pull-up at boot, so
+      `svc_nrf_init()` must **reclaim the pin as an output** — which means
+      the analyser cannot be initialised before `hacku_input_init()` runs.
+    - Both pins go into `hacku_input_set_button_mask()` while the screen is
+      live. Masked buttons are neither sampled as keys nor able to drag CSN
+      to ground mid-transaction (which would merge every following SPI
+      frame into garbage and spike current through the button).
+    - **OK and RIGHT are therefore physically dead on this screen.** They
+      still arrive over the caster, which is an independent path. The
+      on-screen legend deliberately does **not** mention RIGHT: a hint
+      naming a key that cannot physically fire there is a lie about what
+      the device can do. `teardown_radios()` is the only place that clears
+      the mask, so OK/RIGHT cannot stay dead for the rest of the session.
+  - **RF self-interference is not optional housekeeping.** The ESP32's own
+    Wi-Fi and BT are in the same band and would light every column of the
+    trace. `enter_menu_item(9)` tears Wi-Fi and BT down before the screen
+    opens, and `ui_nrf_run()` repeats both so the screen is safe to enter
+    from anywhere.
+  - **Sweeps are INCREMENTAL, on a 200 ms tick, not one blocking pass.** A
+    full 125-channel sweep at 8 samples is ~150 ms of solid SPI and busy
+    wait; doing that in one call would stall the key loop for the whole
+    sweep. `ui_nrf_tick()` advances `STEP_CHANNELS` (24) per tick instead,
+    which keeps input responsive and gives the screen a moving sweep cursor
+    for free. `NRF_TICK_MS` is its own cadence, deliberately faster than
+    every other live screen's 500 ms.
+  - **The waterfall history is `uint64_t`, not `uint32_t`.** A column is
+    `PLOT_H` = 36 rows deep and `1 << 35` is not representable in Xtensa's
+    32-bit `unsigned long`, so a `uint32_t` column is both an overflow and a
+    silent truncation. 125 × 8 B = 1 KB static. History advances once per
+    *completed sweep*, so all columns scroll in lockstep.
+  - **The plot scale is FIXED at 0..samples, not auto-ranged.** An autoscale
+    makes a quiet band look busy and stops two screenshots taken a minute
+    apart from being comparable — the same reason the background status bar
+    has no jitter. Changing `svc_nrf_samples()` or the rate resets the trace
+    rather than rescaling it, because old samples against a new scale are
+    the quietest kind of wrong.
+  - **Decoupling is mandatory on the module.** Add 10 µF across the nRF's
+    VCC/GND at the module. Without it the chip browns out on SPI activity
+    and the presence probe fails intermittently — which looks exactly like
+    bad wiring.
 * **Injection**: `wsl_bypasser.*` overrides the driver's private
   `ieee80211_raw_frame_sanity_check()` (which lives in the closed Wi-Fi blob
   and rejects management subtypes) and `main/CMakeLists.txt` links with

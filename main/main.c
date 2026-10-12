@@ -24,6 +24,8 @@
 #include "svc_wicoll.h"
 #include "svc_a2dp.h"
 #include "ui_a2dhijack.h"
+#include "svc_nrf.h"
+#include "ui_nrf.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
@@ -48,17 +50,19 @@ typedef enum {
     SCR_SURVEY,
     SCR_WICOLL,
     SCR_AUDIOHIJACK,
+    SCR_NRF,
 } screen_t;
 
 static const char *MENU_ITEMS[] = {
     "WiFi scan", "BLE scan", "WiFi attacks", "BLE attacks",
     "WiFi passive", "BLE passive", "Channel survey", "Collateral",
-    "Audio hijack",
+    "Audio hijack", "2.4G spectrum",
 };
-#define MENU_N 9
+#define MENU_N 10
 
 static int64_t s_last_atk_tick = 0; /* live-attack status repaint (ms) */
 static int64_t s_last_sniff_tick = 0; /* passive counter repaint (ms) */
+static int64_t s_last_nrf_tick = 0; /* spectrum sweep slice (ms) */
 
 /* "Direct" mode: the calculator disguise is off and the device goes straight
  * to the menu. Toggled by holding the module's BOOT button (GPIO0) for
@@ -119,10 +123,18 @@ static void teardown_radios(void) {
     svc_a2dp_stop();
     svc_deauth_stop();
     wicoll_stop();
+    svc_nrf_stop();
     svc_sniff_stop();
     svc_ble_passive_stop();
     svc_wifi_teardown();
     svc_ble_stop();
+    /* Hand GPIO14 and GPIO26 back to the keypad. svc_nrf_stop() releases
+     * the SPI device but cannot undo the button mask, and leaving it set
+     * would silently kill OK and RIGHT for the rest of the session - a
+     * fault that would look like two broken buttons rather than a stale
+     * flag. Same reasoning as the other stops here: every radio owner goes
+     * before any teardown underneath it. */
+    hacku_input_set_button_mask(0);
     ui_wifiscan_drop(); /* free scan lists so the next bring-up gets the block */
     ui_blescan_drop();
 }
@@ -280,6 +292,22 @@ static int enter_menu_item(int sel, screen_t *screen_out) {
         ui_blescan_drop();
         *screen_out = SCR_AUDIOHIJACK;
         ui_a2dhijack_run();
+        return 1;
+    }
+    if (sel == 9) {                       /* 2.4 GHz spectrum analyser */
+        /* Same guard as everywhere else, and here the Wi-Fi teardown is not
+         * optional housekeeping: the ESP32's own 2.4 GHz transmissions land
+         * in the nRF24's own analysis band and would light every column of
+         * the trace. ui_nrf_run() repeats the two critical stops so the
+         * screen is safe to enter directly. */
+        svc_deauth_stop();
+        wicoll_stop();
+        svc_sniff_stop();
+        svc_ble_passive_stop();
+        svc_ble_stop();
+        svc_wifi_teardown();
+        *screen_out = SCR_NRF;
+        ui_nrf_run();
         return 1;
     }
     return 0;
@@ -493,6 +521,11 @@ void app_main(void) {
                     screen = SCR_MENU;
                     show_menu();
                 }
+            } else if (screen == SCR_NRF) {
+                if (ui_nrf_key(k) == NRF_EXIT_MENU) {
+                    screen = SCR_MENU;
+                    show_menu();
+                }
             }
         }
         hal_oled_caster_poll(); /* skipped-frame catch-up + self-heal */
@@ -542,6 +575,18 @@ void app_main(void) {
             if (now_ms - s_last_sniff_tick >= 500) {
                 s_last_sniff_tick = now_ms;
                 ui_a2dhijack_tick();
+            }
+        }
+        /* The spectrum analyser is faster than the rest on purpose. It
+         * advances the sweep by a slice per tick rather than taking a whole
+         * band pass at once, so the trace is genuinely live instead of
+         * stepping once a second - but that only reads as smooth if the
+         * updates are dense enough for the eye to join them up. */
+        if (screen == SCR_NRF) {
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            if (now_ms - s_last_nrf_tick >= NRF_TICK_MS) {
+                s_last_nrf_tick = now_ms;
+                ui_nrf_tick();
             }
         }
         if (unlocked &&

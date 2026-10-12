@@ -51,6 +51,15 @@ Target: classic **ESP32-WROOM**, 0.96" **SSD1306 128x64 OLED** (I2C), 6 buttons.
   - **The whole feature costs ~1.4 KB of RAM.** The ~41 KB A2DP stack is only allocated while a speaker is actually playing. Classic BT adds ~25 KB of *static* RAM that is linked in permanently — measured on this board: largest contiguous free block 110592 → 102400 with BTDM + Bluedroid + A2DP source + WiFi all up together, against a 16 KB floor
   - **LE audio is unreachable, and that is hardware.** The ESP32's radio is a BLE 4.2 controller with no LE Audio, no LC3 and no BAP, so true-wireless earbuds on the LE Audio path can never be reached. Silicon, not configuration
   - **Discovery is two techniques sharing ONE stack bring-up.** A BLE advert scan first (finds a speaker that is merely powered on — the advert's MAC field *is* the address A2DP needs), then classic inquiry filtered on the Class-of-Device "Rendering" bit (finds anything in pairing mode). Giving each half its own bring-up silently broke the inquiry half, because it was posting at a stack that had already been deinitialised
+- **2.4G spectrum** (menu item 10) → live 2.4 GHz spectrum analyser on an external **nRF24L01+** over SPI3, on the OLED. Sweeps 125 channels (2400-2524 MHz) continuously with a decaying peak hold, a sweep cursor, and a `OK`-cycled waterfall view. `UP`/`DOWN` trade resolution against sweep speed; `RIGHT` switches receiver bandwidth (250 kbps / 1 Mbps / 2 Mbps)
+  - **It measures a hit rate, not decibels — the chip cannot do better.** The nRF24L01+ has no RSSI register. Its only power measurement is the Received Power Detector: a *single comparator bit* (register 0x09 bit 0) that goes high above a fixed threshold — −64 dBm at 1/2 Mbps, −83 dBm at 250 kbps. So each channel's "level" is the fraction of samples where that bit was set (`hits 6/8`, printed on screen). It is never labelled dBm, because that would be a number the hardware never produced
+  - **RPD is latched, which is the whole implementation.** The bit holds until a packet arrives or CE is pulled low, so reading it N times inside one receive period returns the *same* bit N times — the obvious loop yields only 0 or N and no gradation at all. The driver re-enters RX before every sample and waits 130+40 µs for the AGC. That is the difference between a working analyser and a two-level one
+  - **Not a WiFi channel meter.** The nRF24 channels are 1 MHz wide starting at 2400, so they do *not* line up with 2.4 GHz WiFi channels (which start at 2412 and are 5 MHz apart). A peak near 2412 means "energy in 2412-2413 MHz", not "channel 1". Map by frequency, not by number
+  - **A PA+LNA module changes what you can see.** The external LNA raises sensitivity but also raises the noise floor, so it finds more and reads higher everywhere. Useful for detection, not for comparing absolute levels against the bare chip
+  - **Wi-Fi and BT are forced down** while it runs. The ESP32 transmits in the same band and would light every column of the trace
+  - ⚠️ **CSN and CE share GPIOs with two buttons.** CSN=14 is the `OK` pin and CE=26 is the `RIGHT` pin, so those two keys are inert while the screen is open (they still work over the PC viewer). `RIGHT` is therefore deliberately absent from the on-screen legend. See `AGENTS.md` before rewiring — moving either pin off the keypad fixes it
+  - **Requires a 10 µF capacitor** across the module's VCC/GND. Without it the chip browns out during SPI traffic and the probe fails intermittently, which looks exactly like bad wiring
+  - After the reference project [`ESP32-RF-Spectrum-Scanner`](https://github.com/dkydivyansh/ESP32-RF-Spectrum-Scanner) (GPL-3.0), with the register-level behaviour verified against Nordic's datasheet and the `nRF24/RF24` driver source
 - One radio at a time (WiFi torn down before BLE and vice versa); full teardown on lock (stealth + power)
 - SSD1306 probe at boot (I2C 0x3C/0x3D); without an OLED the device still runs caster-only
 - PKC dirty-rect caster mirror (always on): mono OLED pixels expanded to RGB565 white/black over UART0 @ 460800 baud + remote keys from viewer
@@ -63,6 +72,9 @@ Target: classic **ESP32-WROOM**, 0.96" **SSD1306 128x64 OLED** (I2C), 6 buttons.
 |---|---|
 | OLED SSD1306 I2C | SDA 21, SCL 22, 400 kHz, addr 0x3C (0x3D retry) |
 | Buttons to GND, internal pull-ups, active low | UP 32, DOWN 33, LEFT 25, RIGHT 26, OK 14, BACK 13 |
+| nRF24L01+ spectrum (optional, menu 10) | CE 26 ⚠️, CSN 14 ⚠️, MOSI 23, MISO 19, SCK 18, IRQ n/c, VCC 3.3 V, **+10 µF cap** |
+
+⚠️ CE and CSN are the `RIGHT` and `OK` button pins — see the note above.
 | USB console / caster | UART0 @ 460800 baud |
 
 2 MB flash layout (`partitions.csv`): factory-only, no OTA.
@@ -98,6 +110,7 @@ No ESP-IDF needed to flash a release: see `firmware/README.txt` (esptool only).
 
 - Physical: 6 buttons navigate the keypad cursor, OK selects, BACK deletes / goes back.
 - Remote (viewer focused): `W/A/S/D` = arrows, `E`/Enter = OK, `B`/Esc = BACK.
+- **2.4G spectrum**: `OK` cycles spectrum / waterfall, `UP`+`DOWN` set samples per channel (resolution vs speed), `RIGHT` sets receiver bandwidth, `BACK`/`LEFT` exit. `RIGHT` is **remote-only on that screen** — its pin is the radio's CE.
 
 ### One-button mode
 
@@ -193,6 +206,8 @@ AGENTS.md        repo conventions, build commands, hard constraints
 
 ## Known quirks
 
+**Two of the six buttons belong to the spectrum analyser.** CSN is on GPIO14 (`OK`) and CE on GPIO26 (`RIGHT`). While that screen is open both keys are masked — not sampled, and unable to drag CSN low mid-SPI which would corrupt the bus — and restored on exit. Nothing else is affected, but **do not re-run `hacku_input_init()` while it is live**: that reconfigures GPIO14 as an input and the radio stays deselected for the rest of the session. The permanent fix is to move either nRF pin off the keypad.
+
 **"low mem XXK reboot".** The 1 KB mono framebuffer is static (no heap) but ESP32 WiFi/Bluedroid `deinit` still leaves ~10-15 KB of heap residue per radio switch (fragmentation of the *largest contiguous* block, not total free). After several WiFi↔BLE round-trips the largest block can drop under the 16 K bring-up floor, so the device cleanly reboots into the requested scan instead of asserting. The `XXK` on the `scanning...` screen is that meter.
 
 **No logs while the caster runs.** The caster mirror is always on and silences the log bus (log bytes would corrupt the PKC rect stream), so the device looks silent on a 115200 monitor by design. Only early boot logs (before the caster starts) are visible. Use the viewer or on-OLED diagnostics.
@@ -224,6 +239,7 @@ Measured on a strong local AP (−25 dBm, 1 AP on ch6, 100 TU interval): **~86% 
 ## Credits
 
 - Frame-level reference for the deauth template and 100 ms TX cadence: [Hydra-ESP](https://github.com/SameerAlSahab/Hydra-ESP) (GPL-3.0), itself derived from risinek's esp32-wifi-penetration-tool and inspired by spacehuhn's esp8266_deauther. HackUlator's implementation is its own code written against the public ESP-IDF `esp_wifi_80211_tx()` API.
+- Spectrum analyser concept, waterfall and sweep structure: [ESP32-RF-Spectrum-Scanner](https://github.com/dkydivyansh/ESP32-RF-Spectrum-Scanner) (GPL-3.0). Its `RPD` sample loop is *not* carried over — it reads the latched bit repeatedly inside one receive period, so its "samples" can only ever be 0 or N. Register behaviour here was verified against Nordic's nRF24L01+ datasheet and the `nRF24/RF24` driver source.
 
 ## License
 
