@@ -300,6 +300,21 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
     gesture that made the two scan lists strictly downward-only. Both wrap now,
     and `s_top` is corrected for the wrap in both directions. **When adding a
     list, wrap it** — a clamped list is a trap once one button has to drive it.
+  - **One button must be able to ARM A TARGET, and could not.** Six keys and
+    the caster arrows are both dead in this mode, and the only thing that armed
+    a target was `KEY_RIGHT` in the scan *detail* view: `LIST -> OK -> detail ->
+    RIGHT`. That last press can never happen, so **a target could not be set at
+    all** and the whole WiFi/BLE attack path was unreachable. The fix is in
+    `ui_wifiscan.c` / `ui_blescan.c`: in one-button mode `OK` on the LIST (the
+    two-tap gesture) calls `arm_selected()` instead of opening the detail view,
+    and the armed row is marked `*` on the row itself rather than in a
+    transient message — a selection that vanishes after a second has to be
+    remembered, one that is on the row is still there when you scroll back.
+    The header gains `2x=SET`, because a gesture that is not advertised is a
+    gesture nobody finds. **Trade-off, deliberate:** the detail browser is a
+    six-button feature; on the keypad nothing changed (OK opens detail, RIGHT
+    arms). Do not "fix" this by putting the detail view back on two taps — that
+    is what made the mode useless in the first place.
   - **The hold draws a filling bar** (`draw_hold_progress()`, home screens
     only). That bar is the only thing that separates "counting down" from
     "this pin is not wired to anything" — a dead button and a working one look
@@ -415,6 +430,72 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
     the profile being deinit'd. Wait (bounded) for `s_connected` to clear.
   - **Return-code trap:** `A2DH_EXIT_MENU` is 1 and **0 means STAY**. Every
     path in `ui_a2dhijack_key()` returns 0 unless it means to leave.
+  - **A state machine that gets ONE chance is a silent-failure machine.** This
+    is the single lesson of the "connects but does not play sound" pass, and it
+    generalises to every other service here. Three separate give-ups produced
+    the identical symptom — link up, screen cheerful, zero audio, no diagnostic
+    (the always-on caster suppresses logs by design): `CHECK_SRC_RDY` sent once;
+    `START` acked with `STARTED` never arriving; and a producer that `break`s
+    on an alloc failure or a refused send. **`svc_a2dp_pump()` is the fix and it
+    must stay.** It re-asks the sink, times out a connect that was never
+    answered, and watchdog-times a start that never lands. It rides the UI's
+    500 ms tick rather than owning a timer, so there is nothing to leak.
+  - **The pump must be BOUNDED, or it fights the user.** Re-asking forever
+    restarts a speaker that suspended because somebody pressed pause *on the
+    speaker*. It is insistent only within `MEDIA_GRACE_MS` of the link coming up,
+    or while the user has asked for audio and it has not arrived.
+  - **`ESP_BT_GAP_CFM_REQ_EVT` is not optional.** SSP raises a user-confirmation
+    request that the application *must* answer with
+    `esp_bt_gap_ssp_confirm_reply()`; there is no default and no log near the
+    cause. Handling `PIN_REQ` and `KEY_REQ` but not `CFM_REQ` is what makes
+    pairing hang on every headset from the last decade. Pair with
+    `ESP_BT_SP_IOCAP_MODE` = `ESP_BT_IO_CAP_NONE` (this device has no display
+    and no keypad, so it must say so) and an `esp_bt_gap_set_pin()` default.
+  - **`esp_bt_gap_start_discovery()` does NOT make you discoverable.** It only
+    issues the HCI_Inquiry. The window must be opened with
+    `esp_bt_gap_set_scan_mode(CONNECTABLE, GENERAL_DISCOVERABLE)` first and
+    closed on `DISCOVERY_STOPPED`, or the classic half of discovery finds
+    nothing — which reads as "that device is not discoverable".
+  - **`cfg.mode` must equal what you pass to `esp_bt_controller_enable()`.** The
+    IDF example relies on sdkconfig agreeing between the two calls; ESP32
+    rejects the enable when they disagree (`btdm_controller_get_mode()` in
+    `components/bt/controller`). Set the field explicitly.
+  - **AVRCP is not a luxury for a source.** A TV, soundbar or Android device in
+    A2DP-source mode routinely sits "connected, streaming, silent" until it is
+    sent a PLAY passthrough. `esp_avrc_ct_init()` must run **before**
+    `esp_a2d_source_init()` and `esp_avrc_ct_deinit()` **after**
+    `esp_a2d_source_deinit()` — the IDF documents that order. Optional: a failure
+    there is logged and stepped over, never load-bearing.
+  - **Sends must stay under the MTU, not at it.** The stack adds its own AVDU
+    media header on top of the PCM (`A2DPEncoder.h`: `payload_header_size()` is
+    1 for SBC), so `data_len == mtu` asks for one byte more than the L2CAP
+    channel was negotiated for. `A2DP_SEND_GUARD` is 8. And
+    `ESP_ERR_INVALID_SIZE` is refused *every* time, so an overshoot must shrink
+    the MTU and continue — the old code gave up on the first one.
+  - **`s_tune_done` is sticky, and the tick acts on it by MOVING THE SCREEN.**
+    It is only cleared by `start_feed()`. So acting on it from every screen
+    meant BACK from the tune list was undone 500 ms later and the user could not
+    leave at all — reported as *"it flashes into another screen and comes back
+    into the audio selection"*. It is now cleared by
+    `svc_a2dp_clear_tune_done()` as soon as the UI acts, and only acted on while
+    the PLAY screen is up. **Any sticky flag a tick acts on by navigating must
+    be cleared the moment it is consumed.**
+  - **Six screen states, not two.** `svc_a2dp_state_name()` used to say "linked"
+    for anything merely CONNECTED, which is exactly what a sink that has
+    refused to start its media stream looks like. `A2DP_LINK_*` now separates
+    down / idle / wait / media / streaming / failed, and a named fault
+    (`tx stalled`, `mtu`, `bad handle`) overrides the generic wording. A
+    failure that cannot be read on the screen cannot be debugged when the log
+    bus is off.
+  - **Producer pacing lives in `main/a2dp_pace.h`, shared with its test.**
+    `tools/hk_a2dp_pace.c` compiles that header, so the schedule is measured
+    rather than asserted. Two arithmetic facts it caught, both invisible from
+    outside: 147 frames is 3333.33 µs, so summing TRUNCATED per-chunk durations
+    loses 1 µs every three chunks (441735 frames handed over where 441000 is
+    real time, in a simulated 10 s) — the due time must come from the
+    **cumulative** frame count; and the chunk size only works because 3 × 147 =
+    441 = exactly one 10 ms tick at 44.1 kHz, where the old 168 needed three
+    sends to cover 504 frames and ran ~4 % fast. **Do not "tidy" these numbers.**
   - **RTTTL violates its own spec constantly.** The parser accepts the dotted
     '.' **before or after** the octave (most real files use before), lowercase,
     embedded spaces, `h`/`H` for B, `p` for rest, octaves outside 4-7 and
@@ -568,6 +649,15 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
   `tools/hk_px.py`, `tools/hk_anchor.py`, `tools/hk_palette.py` —
   caster-wire and pixel probes. All accept `--port`, auto-detect if
   omitted, and run on Windows/Linux/macOS.
+* `gcc -O2 -Wall -o /tmp/pace tools/hk_a2dp_pace.c -I main && /tmp/pace` —
+  the A2DP producer's real-time schedule. **No hardware and no serial port
+  needed, and it is the only place these properties can be observed**: it
+  includes `main/a2dp_pace.h`, the same header the firmware's producer task
+  uses, so it measures the real arithmetic rather than a copy of it. Checks
+  exact tick boundaries, zero drift, stall recovery, the MTU clamp and the
+  no-busy-loop property. Needs only a C compiler — unlike `hk_rtttl.py`,
+  which wants MSVC. Run it before touching any of the numbers in
+  `a2dp_pace.h`.
 * Test PNGs (`test_mem*`, `test_out`, `test_deauth`, `tools/probe_*`) are
   throwaway and gitignored — never commit them.
 

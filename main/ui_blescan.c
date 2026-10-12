@@ -77,9 +77,16 @@ static void draw_msg(const char *l1, const char *l2) {
     hal_oled_flush_all();
 }
 
+/* One list row: "<mark>name rssi".
+ *
+ * The leading mark is the ARMED-TARGET indicator and lives on the row rather
+ * than in a transient message: a selection that vanishes after a second has
+ * to be remembered by the user, one that is on the row is still there when
+ * they scroll back. */
 static void draw_row(oled_fb_t *fb, int y, ble_dev_t *dv, int sel) {
     char row[36];
     char nm[20];
+    int armed = tgt_ble_has() && !strcmp(dv->mac, tgt_ble_mac());
     snprintf(nm, sizeof(nm), "%.18s", dv->name);
     int rs = dv->rssi;
     if (rs < -999) {
@@ -88,7 +95,7 @@ static void draw_row(oled_fb_t *fb, int y, ble_dev_t *dv, int sel) {
     if (rs > 999) {
         rs = 999;
     }
-    snprintf(row, sizeof(row), "%-18.18s %4d", nm, rs);
+    snprintf(row, sizeof(row), "%c%-16.16s %4d", armed ? '*' : ' ', nm, rs);
     row[32] = 0;
     if (sel) {
         oled_fill_rect(fb, 0, y, OLED_W, ROW_PX, 1);
@@ -96,12 +103,35 @@ static void draw_row(oled_fb_t *fb, int y, ble_dev_t *dv, int sel) {
     oled_text(fb, &oled_font, 0, y + 1, row, sel ? 0 : 1);
 }
 
+/* Set the highlighted device as the attack target. Only offered in ONE-BUTTON
+ * mode: with one button the HAL emits DOWN / OK / BACK and nothing else, so
+ * KEY_RIGHT - the only key that used to arm a target - is unreachable from the
+ * physical keypad (dead there) and from the caster (arrows ignored). A target
+ * could therefore never be armed at all in that mode, which made the whole
+ * BLE attack path unreachable. The two-tap gesture takes over the job the
+ * RIGHT key used to do, on the row the cursor is already on. */
+static int arm_selected(void) {
+    if (s_count <= 0 || s_sel < 0 || s_sel >= s_count) {
+        return 0;
+    }
+    tgt_ble_set(s_devs[s_sel].mac, s_devs[s_sel].name,
+                s_devs[s_sel].addr_type);
+    return 1;
+}
+
 static void draw_list(void) {
     oled_fb_t *fb = hal_oled_fb();
     oled_clear(fb, 0);
-    char head[24];
-    snprintf(head, sizeof(head), s_count < 0 ? "scan failed" : "%d devices",
-             s_count < 0 ? 0 : s_count);
+    char head[32];
+    /* Header carries the one-button gesture hint; it is the only line with
+     * room, and a gesture that is not advertised is a gesture nobody finds. */
+    if (s_count < 0) {
+        snprintf(head, sizeof(head), "scan failed");
+    } else if (hacku_input_onebutton()) {
+        snprintf(head, sizeof(head), "%d devs 2x=SET", s_count);
+    } else {
+        snprintf(head, sizeof(head), "%d devices", s_count);
+    }
     int hw = oled_text_w(&oled_font, head);
     oled_text(fb, &oled_font, (OLED_W - hw) / 2, 0, head, 1);
     oled_hline(fb, 0, 10, OLED_W, 1);
@@ -134,6 +164,8 @@ static void draw_list(void) {
             oled_text(fb, &oled_font, 0, OLED_H - 9, left, 1);
             if (tgt_wifi_has() || tgt_ble_has()) {
                 ui_status_targets(right, sizeof(right));
+            } else if (hacku_input_onebutton()) {
+                snprintf(right, sizeof(right), "2x=SET");
             } else {
                 snprintf(right, sizeof(right), "OK");
             }
@@ -351,6 +383,18 @@ int ui_blescan_key(hacku_key_t k) {
                 }
                 return 0;
             case KEY_OK:
+                /* In one-button mode a double tap arms the target instead of
+                 * leaving the detail view, because KEY_RIGHT is unreachable
+                 * there and this is the last screen that could do it. */
+                if (hacku_input_onebutton()) {
+                    arm_selected();
+                    draw_detail();
+                    return 0;
+                }
+                s_detail = 0;
+                s_page = 0;
+                draw_list();
+                return 0;
             case KEY_LEFT:
             case KEY_BACK:
                 s_detail = 0;
@@ -393,9 +437,19 @@ int ui_blescan_key(hacku_key_t k) {
             return 0;
         case KEY_OK:
             if (s_count > 0) {
-                s_detail = 1;
-                s_page = 0;
-                draw_detail();
+                /* See arm_selected(): with one button a double tap arms the
+                 * highlighted device as the attack target, because KEY_RIGHT
+                 * is a dead key in that mode and the detail view it used to
+                 * live in cannot be reached from the keypad. On the six-button
+                 * keypad OK still opens the detail view. */
+                if (hacku_input_onebutton()) {
+                    arm_selected();
+                    draw_list();
+                } else {
+                    s_detail = 1;
+                    s_page = 0;
+                    draw_detail();
+                }
             }
             return 0;
         case KEY_BACK:

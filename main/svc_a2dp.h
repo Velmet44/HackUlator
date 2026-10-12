@@ -32,7 +32,11 @@
  * The ESP-IDF a2dp_source example negotiates and starts media but never calls
  * esp_a2d_source_audio_data_send(); a third-party IDF port ships a 5.3 MB PCM
  * header and never plays it either. The streaming path below is written from
- * the API rather than adapted from an example.
+ * the API rather than adapted from an example - CROSS-CHECKED against
+ * pschatzmann/ESP32-A2DP (BSD), whose BluetoothA2DPSource.cpp and
+ * A2DPEncoder.cpp are the only known-good A2DP *source* implementations
+ * outside Espressif's own tree. See main/a2dhijack.md for what was taken from
+ * it and why.
  */
 
 #include <stdint.h>
@@ -139,9 +143,51 @@ const char *svc_a2dp_stored_name(void);
 /* Disconnect and unwind media. */
 int svc_a2dp_disconnect(void);
 
+/* ---- link / media state, for the screen ----
+ *
+ * These exist because the single biggest failure mode of this feature is
+ * SILENCE WITH NO DIAGNOSTIC: the A2DP link comes up, the UI says "linked",
+ * and nothing plays. Every reason for that (media never started, send
+ * refused, MTU too small, stack not up) has to be visible on a 128x64
+ * screen or the feature cannot be debugged at all. */
+
+typedef enum {
+    A2DP_LINK_DOWN = 0,   /* stack not up */
+    A2DP_LINK_IDLE,       /* up, not connected */
+    A2DP_LINK_WAIT,       /* connect requested, no answer yet */
+    A2DP_LINK_MEDIA,      /* connected, media start in progress */
+    A2DP_LINK_STREAMING,  /* media started, audio flowing */
+    A2DP_LINK_FAILED      /* connect gave up (see svc_a2dp_note()) */
+} a2dp_link_t;
+
+/* Short state word for the screen: "down" "idle" "wait" "media" "stream"
+ * "fail". */
+const char *svc_a2dp_state_name(void);
+a2dp_link_t svc_a2dp_link(void);
+
+/* Why the last attempt failed / stalled, as a short word for the screen:
+ * "no answer", "sink busy", "no start", "tx stalled", "mtu" and so on.
+ * EMPTY STRING when there is nothing to report. Never NULL. */
+const char *svc_a2dp_note(void);
+
+/* 1 when svc_a2dp_note() has something to say. */
+int svc_a2dp_failed(void);
+
+/* Housekeeping the UI must call from its tick: re-asks the sink whether it is
+ * ready to play, gives up on a connect that never completes, and re-arms a
+ * start that was refused.
+ *
+ * This is the single most important call in the feature. The one-shot
+ * connect -> CHECK_SRC_RDY -> START handshake works on a cooperative sink and
+ * fails on a busy one, and when it fails NOTHING in the stack retries it: the
+ * link stays up, the screen says "linked", and no sound ever comes out. The
+ * working reference implementation runs a 10 s heartbeat that re-issues
+ * CHECK_SRC_RDY for exactly this reason; this is the same thing, on the UI's
+ * 500 ms cadence. 1 if the state moved and the screen should be repainted. */
+int svc_a2dp_pump(void);
+
 int svc_a2dp_connected(void);
 int svc_a2dp_playing(void);
-const char *svc_a2dp_state_name(void);
 
 /* Start streaming an RTTTL tune. The string must stay valid until the tune
  * ends or svc_a2dp_stop_tune() returns; it is parsed in place, never copied.
@@ -156,6 +202,16 @@ int svc_a2dp_play_tone(uint32_t freq_hz);
  * task itself: two-phase stop, same rule as svc_deauth and svc_ble. */
 void svc_a2dp_stop_tune(void);
 
+/* Forget that a tune reached its end.
+ *
+ * MUST be called by the UI once it has acted on svc_a2dp_tune_done(). The flag
+ * is sticky - only start_feed() clears it - so an un-acted-on "done" is read
+ * again on every single tick. That is not a cosmetic bug: the tick acts on it
+ * by forcing the screen to the tune list, so a stale flag pinned the screen
+ * there and the user could not leave it with BACK at all. It presented as
+ * "it flashes into another screen and comes back". */
+void svc_a2dp_clear_tune_done(void);
+
 uint32_t svc_a2dp_frames(void);   /* PCM frames accepted by the stack */
 uint32_t svc_a2dp_notes(void);    /* notes played */
 uint32_t svc_a2dp_underruns(void);/* sends refused for lack of buffer */
@@ -164,6 +220,9 @@ int      svc_a2dp_tune_done(void);/* tune reached its end */
 
 /* First esp_err from a refused send, 0 = none. */
 int svc_a2dp_tx_error(void);
+
+/* Audio MTU negotiated on the current link, in bytes. 0 before CONNECTED. */
+int svc_a2dp_mtu(void);
 
 /* Connected peer, for the screen. */
 const char *svc_a2dp_peer_name(void);

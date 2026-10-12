@@ -1,8 +1,9 @@
 # Audio Device Hijacker — implementation notes
 
-**Status: feature complete, streaming UNVERIFIED on hardware.** Everything below
-records what was measured, what was fixed, and what is still open. It is written
-so the next person does not repeat the expensive mistakes.
+**Status: the silence bugs are fixed; PCM streaming is still UNVERIFIED on
+hardware.** Everything below records what was measured, what was fixed, and what
+is still open. It is written so the next person does not repeat the expensive
+mistakes.
 
 ## What it does
 
@@ -11,8 +12,142 @@ source** and play coded tunes on it. RTTTL melodies synthesised on the ESP32 —
 no audio files, no decoder, no SD card.
 
 ```
-menu -> 9 -> AUDIO HIJACK -> SPEAKERS -> TUNES -> PLAYING
+menu -> 9 -> AUDIO HIJACK -> SPEAKERS -> LINKING -> TUNES -> PLAYING
 ```
+
+## The report that started this pass
+
+> it connects but does not play sound. it flashes into another screen and comes
+> back into the audio selection
+
+Both halves share one root cause class: **a state machine that was given exactly
+one chance to run, and no way to report that it had failed.** Every fix below is
+grouped by that theme because every one of them is the same bug.
+
+### A. "It flashes into another screen and comes back"
+
+`s_tune_done` is sticky — only `start_feed()` ever cleared it — and
+`ui_a2dhijack_tick()` acted on it from *every* screen by forcing
+`s_screen = SCR_TUNES`. So once any tune had ended, pressing BACK from the tune
+list was undone by the very next 500 ms tick, and the user could not leave the
+screen at all. The only escape was the one-button hold, i.e. go home.
+
+Two independent fixes, both required:
+
+- the tick only acts on the flag while it is **on the play screen**
+- `svc_a2dp_clear_tune_done()` exists, and the UI calls it as soon as it has
+  acted, so the flag cannot fire a second time
+
+Same shape as the `ui_bleatk.c` return-code trap and the collateral profile
+desync in `AGENTS.md`: one piece of state, two owners, one of which assumed it
+was alone.
+
+### B. "Connects but does not play sound"
+
+Six separate reasons, all with the identical symptom — link up, screen
+cheerful, no audio, and **no diagnostic**, because the always-on caster
+suppresses the log bus by design:
+
+| # | what happened | fix |
+|---|---|---|
+| 1 | `CHECK_SRC_RDY` was sent **once**, from the connect callback. A sink answering `BUSY`/`FAILURE` that first time — normal for one still opening its own end — left the link up with the media machine stopped for good. | `svc_a2dp_pump()` re-asks every 2 s while useful. The single most important change here. |
+| 2 | **`ESP_BT_GAP_CFM_REQ_EVT` was never handled.** SSP raises a confirmation request the application *must* answer with `esp_bt_gap_ssp_confirm_reply()`; there is no default. Every headset from the last decade uses SSP, so pairing sat until it timed out. | Answered unconditionally (own lab kit). Plus `ESP_BT_SP_IOCAP_MODE` = `ESP_BT_IO_CAP_NONE`, `esp_bt_gap_set_pin()`, and `min_16_digit` honoured in the PIN reply. |
+| 3 | `START` acknowledged but `AUDIO_STATE_STARTED` never arrived — nothing timed it out, nothing retried. | `MEDIA_START_MS` watchdog → `MEDIA_IDLE` → re-ask. |
+| 4 | Four silent `break`s in the producer killed the task on an alloc failure or a refused send; the screen said "notes 0" and nothing else. | Each now retries against a bounded stall counter, and if genuinely stuck sets a **named** reason that is displayed: `tx stalled`, `mtu`, `bad handle`, `out of mem`. |
+| 5 | Sends used exactly the reported MTU. The stack adds its own AVDU media header on top, so that is one byte more than the channel was negotiated for → `ESP_ERR_INVALID_SIZE` → and the old code quit on the *first* one. | `A2DP_SEND_GUARD` = 8 bytes of head-room; an overshoot **halves the MTU and continues** instead of killing the tune. |
+| 6 | No AVRC controller. TVs, soundbars and Android devices in A2DP-source mode routinely sit "connected, streaming, silent" until sent a PLAY. | `esp_avrc_ct_init()` + `esp_avrc_ct_send_passthrough_cmd(PLAY)`, initialised **before** A2DP and deinitialised after — the order the IDF documents. Optional: failure is logged and stepped over. |
+
+**Bounded insistence, deliberately.** The pump does *not* re-ask forever. A
+speaker that suspended the stream because somebody pressed pause **on the
+speaker** would be restarted a second later, which is worse than the bug. It is
+insistent only inside `MEDIA_GRACE_MS` of the link coming up, or while the user
+has actually asked for audio and it has not arrived.
+
+### C. The screen used to lie
+
+`svc_a2dp_state_name()` returned `"linked"` for anything merely CONNECTED. Six
+distinguishable states now, on the tune list, the linking screen and the playing
+screen: `down / not linked / linking... / no stream / streaming / <reason>`.
+**A failure that cannot be read on the screen cannot be debugged**, and the log
+bus is off by default on this feature.
+
+A `LINKING` screen was added between picking a speaker and the tune list: the
+connect is asynchronous and pairing can take tens of seconds, so the old code
+dropped the user onto a tune list for a speaker that was not connected.
+
+## Pacing — a measurable bug, found by measuring
+
+The old producer counted frames into a 441-frame (10 ms) budget and
+`vTaskDelay(1)` per window. The chunk was 672/4 = **168** frames, so a window
+closed on 504 frames — **11.4 ms of audio handed over in 10 ms of wall clock.**
+Every tune ran ~4 % fast and the error compounded, because the delay was a tick
+(and jitters) while the budget was never re-derived from real time.
+
+Fixed in two layers.
+
+**`main/a2dp_pace.h`** holds the whole schedule as pure arithmetic, header-only,
+so `tools/hk_a2dp_pace.c` compiles **the same functions the firmware runs**
+instead of a copy. `AGENTS.md` records twice that a hand-synced copy is exactly
+the failure mode this project has already been bitten by.
+
+* Chunk is now **588 bytes / 147 frames = 3.33 ms**. Three of them is 441
+  frames — exactly one 10 ms tick at 44.1 kHz.
+* The due time comes from the **cumulative** frame count, never a per-chunk
+  duration. Measured, not reasoned about: `147e6/44100` is 3333.33 µs and
+  truncation makes it 3333, so summing truncated chunks loses a microsecond every
+  three of them — a simulated 10 s run handed over **441735** frames where
+  441000 is real time. One division at the end makes every tick boundary exact
+  and the error cancels.
+* A **lead** runs the producer ahead of real time (a source exactly on time
+  starves the sink's jitter buffer the moment one send is a tick late), and a
+  **lag limit** rebases rather than flushing a backlog after a long stall.
+
+Host model, `gcc -O2 tools/hk_a2dp_pace.c -I main`:
+
+```
+  147 x 3 = 10000 us, 147 x 300 = 1000000 us (one tick = 10000)
+  realistic stack: lead 10633 us at 10 s, 10633 us at 60 s
+  free stack: lead 10000 us after 10 s (1000 sleeps)
+  jittery stack (0.9 ms per send): lead 10633 us after 60 s
+  12 x 90 ms stalls: 11 resyncs, worst burst 9, lead 9934 us
+```
+
+The identical lead at 10 s and at 60 s **is** the no-drift proof. It is a
+statement about arithmetic, not about sound.
+
+## Other fixes found in the same pass
+
+- **Inquiry could not work at all.** `esp_bt_gap_start_discovery()` only issues
+  the HCI_Inquiry; it does *not* make the local device discoverable. The window
+  is now opened with `esp_bt_gap_set_scan_mode(CONNECTABLE,
+  GENERAL_DISCOVERABLE)` before the search and closed on `DISCOVERY_STOPPED`.
+- **`cfg.mode` now matches `esp_bt_controller_enable()`.** The IDF example relies
+  on sdkconfig agreeing between the two calls; the reference library sets the
+  field explicitly because ESP32 rejects the enable when they disagree
+  (`btdm_controller_get_mode()`).
+- **Scan mode goes non-discoverable once connected**, which is what the
+  reference library does and why: leaving the device discoverable during a source
+  connection is how the peer ends up racing us for the link.
+- **`svc_a2dp_disconnect()` waits for the link to actually come down** (bounded),
+  like `svc_a2dp_stop()`. Clearing the flags on request rather than in the
+  callback meant the next `esp_a2d_source_connect()` raced a live ACL.
+- Dead `s_msg[40]` removed from `ui_a2dhijack.c` (written, never read).
+
+## RAM
+
+Measured delta of this whole pass against the same tree with only these files
+reverted (`idf.py size`):
+
+```
+DRAM   99448 -> 99408    (-40: the dead s_msg[40])
+IRAM  114863 -> 114863   (unchanged)
+flash  +3988 B           (the AVRCP controller was not linked before)
+```
+
+AVRCP costs a few KB of **runtime** heap when `esp_avrc_ct_init()` runs, on top
+of the ~41 KB the A2DP profile already needs. On this screen WiFi is torn down
+entirely (`enter_menu_item(8)`), so the largest-block figure is far above the
+measured 100 KB with both radios up. The 16 KB floor is untouched.
 
 ## The hardware limit, stated once
 
@@ -226,7 +361,7 @@ the speaker simply switched on. The address is persisted in NVS.
 **Verified on hardware:**
 
 - firmware builds, links, flashes, boots clean, no panic
-- all four screens render (`AUDIO HIJACK`, `SPEAKERS`, `TUNES`, `PLAYING`)
+- all screens render (`AUDIO HIJACK`, `SPEAKERS`, `LINKING`, `TUNES`, `PLAYING`)
 - BT stack + Bluedroid + A2DP source bring up, all init calls `ESP_OK`
 - `esp_a2d_source_connect()` is issued without error
 - feature RAM cost 1,408 bytes static; 108 KB largest free block with BT live
@@ -234,17 +369,32 @@ the speaker simply switched on. The address is persisted in NVS.
   calculator, unlock, relock all unaffected)
 - two watchdog/panic bugs found and fixed by on-device backtrace decoding
 
+**Verified on the host, this pass (`tools/hk_a2dp_pace.c`):**
+
+- the producer's schedule is exactly real time, with zero drift (identical lead
+  at 10 s and at 60 s), bounded bursts, and no busy-loop
+- every tick boundary of the send cadence is exact — 441 frames is 10000 µs
+- the MTU clamp respects the AVDU header guard and whole stereo frames
+
 **NOT verified — the open items:**
 
-- **A2DP connection never completes.** `svc_a2dp_state_name()` stays `idle`,
-  meaning the peer does not accept the connection. Untested with a charged
-  headset in true pairing mode; the headset was flat for most of this work.
+- **A2DP has never completed against real audio gear.** No speaker was available
+  during this pass, so the handshake is still untested on silicon; what changed
+  is that it now retries, times out, and says which step failed.
 - **PCM streaming has never actually played audio.** Every code path up to the
-  send call is exercised; the audio coming out of a speaker is not.
+  send call is exercised; audio coming out of a speaker is not. The screen now
+  distinguishes `no stream` from `streaming` and names any tx fault, so the next
+  session on real gear produces an answer instead of silence.
 - **`CONFIG_BT_SMP_ENABLE=y`** appears in the regenerated `sdkconfig` where
   `sdkconfig.defaults` says `n`. A Kconfig defaulting quirk (the symbol is
   invisible and tracks `BT_BLE_SMP_ENABLE`, which the defaults set to `n`).
   Costs RAM; believed harmless; **unexamined**.
+
+**The fastest way to settle the first two:** run it and read the PLAY screen.
+`stream notes N` means the media state machine completed and bytes are moving.
+Anything else now names the step that failed — `no link`, `no stream`, `tx
+stalled`, `mtu`, `bad handle`, `sink busy`. That word is the whole diagnostic,
+and it did not exist before this pass.
 
 ## Known dead ends, so they are not re-tried
 
@@ -315,6 +465,7 @@ container and desyncs on-device decoding.
 ```
 python tools/hk_rtttl.py                      # parser + synth, on the PC
 python tools/hk_rtttl.py --wav out.wav "..."  # render a tune to listen to
+gcc -O2 -Wall -o /tmp/pace tools/hk_a2dp_pace.c -I main && /tmp/pace
 python tools/hk_a2dhijack.py --port COM5      # screen flow on hardware
 ```
 
@@ -322,3 +473,8 @@ python tools/hk_a2dhijack.py --port COM5      # screen flow on hardware
 via `vswhere`, env captured from `vcvars64.bat`) and checks them against 15 real
 RTTTL strings, 7 reference pitches, and malformed input. It is a real test, not
 a smoke test — the corpus is deliberately full of spec violations.
+
+`hk_a2dp_pace.c` needs no toolchain beyond a C compiler: it includes
+`main/a2dp_pace.h`, the header the firmware's producer task uses, so it tests
+the real schedule rather than a copy of it. See "Pacing" above for what it
+proves and why a host test is the only place these properties can be observed.

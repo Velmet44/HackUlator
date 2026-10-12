@@ -123,10 +123,17 @@ static void draw_msg(const char *l1, const char *l2) {
     hal_oled_flush_all();
 }
 
-/* One list row: "ssid ch rssi", truncated to 32 cells. */
+/* One list row: "<mark>ssid ch rssi", truncated to 32 cells.
+ *
+ * The leading mark is the ARMED-TARGET indicator, and it is on the row itself
+ * rather than in a transient message on purpose. A selection that vanishes
+ * after a second has to be remembered by the user; one that is on the row is
+ * still there when they scroll back, and it is the same fact the status bar
+ * is reporting, in the place the eye already is. */
 static void draw_row(oled_fb_t *fb, int y, wifi_ap_t *ap, int sel) {
     char row[36];
     char nm[20];
+    int armed = tgt_wifi_has() && !memcmp(ap->bssid, tgt_wifi_bssid(), 6);
     snprintf(nm, sizeof(nm), "%.18s", ap->ssid[0] ? ap->ssid : "<hid>");
     int ch = ap->channel;
     if (ch < 0) {
@@ -142,7 +149,8 @@ static void draw_row(oled_fb_t *fb, int y, wifi_ap_t *ap, int sel) {
     if (rs > 999) {
         rs = 999;
     }
-    snprintf(row, sizeof(row), "%-18.18s %2d %4d", nm, ch, rs);
+    snprintf(row, sizeof(row), "%c%-16.16s %2d %4d", armed ? '*' : ' ', nm,
+             ch, rs);
     row[32] = 0;
     if (sel) {
         oled_fill_rect(fb, 0, y, OLED_W, ROW_PX, 1);
@@ -150,12 +158,42 @@ static void draw_row(oled_fb_t *fb, int y, wifi_ap_t *ap, int sel) {
     oled_text(fb, &oled_font, 0, y + 1, row, sel ? 0 : 1);
 }
 
+/* Set the highlighted AP as the attack target. Returns 1 if it did.
+ *
+ * Only offered in ONE-BUTTON mode, and the reason is not a preference: with
+ * one button the HAL emits DOWN / OK / BACK from taps and nothing else, and
+ * KEY_RIGHT - the only thing that used to arm a target - is unreachable from
+ * the physical keypad (it is a dead key there) and from the caster (the
+ * arrows are ignored). So in that mode a target could NEVER be armed at all:
+ * the only path was LIST -> OK -> detail -> RIGHT, and that last press can
+ * never happen. The fix is to give the one button's two-tap gesture the job
+ * the RIGHT key used to do, on the row the cursor is already on.
+ *
+ * On the six-button keypad nothing changes: OK still opens the detail view
+ * and RIGHT still arms from there. */
+static int arm_selected(void) {
+    if (s_count <= 0 || s_sel < 0 || s_sel >= s_count) {
+        return 0;
+    }
+    tgt_wifi_set(s_aps[s_sel].ssid, s_aps[s_sel].bssid, s_aps[s_sel].channel);
+    return 1;
+}
+
 static void draw_list(void) {
     oled_fb_t *fb = hal_oled_fb();
     oled_clear(fb, 0);
     char head[32];
-    snprintf(head, sizeof(head), s_count < 0 ? "scan failed" : "%d nets",
-             s_count < 0 ? 0 : s_count);
+    /* The header carries the one-button gesture hint, because it is the only
+     * line big enough for it and because a gesture that is not advertised is
+     * a gesture nobody finds. The bottom right is reserved for the target
+     * readout, which is the feedback that matters after the first use. */
+    if (s_count < 0) {
+        snprintf(head, sizeof(head), "scan failed");
+    } else if (hacku_input_onebutton()) {
+        snprintf(head, sizeof(head), "%d nets 2x=SET", s_count);
+    } else {
+        snprintf(head, sizeof(head), "%d nets", s_count);
+    }
     int hw = oled_text_w(&oled_font, head);
     oled_text(fb, &oled_font, (OLED_W - hw) / 2, 0, head, 1);
     oled_hline(fb, 0, 10, OLED_W, 1);
@@ -188,6 +226,8 @@ static void draw_list(void) {
             oled_text(fb, &oled_font, 0, OLED_H - 9, left, 1);
             if (tgt_wifi_has() || tgt_ble_has()) {
                 ui_status_targets(right, sizeof(right));
+            } else if (hacku_input_onebutton()) {
+                snprintf(right, sizeof(right), "2x=SET");
             } else {
                 snprintf(right, sizeof(right), "OK");
             }
@@ -451,6 +491,20 @@ int ui_wifiscan_key(hacku_key_t k) {
                 }
                 return 0;
             case KEY_OK:
+                /* In one-button mode the two-tap gesture is the ONLY thing
+                 * that can arm a target (see arm_selected), and a target is
+                 * what this screen is for in that mode - so OK arms instead of
+                 * opening the detail view, which RIGHT can no longer reach
+                 * from there. */
+                if (hacku_input_onebutton()) {
+                    arm_selected();
+                    draw_detail();
+                    return 0;
+                }
+                s_detail = 0;
+                s_page = 0;
+                draw_list();
+                return 0;
             case KEY_LEFT:
             case KEY_BACK:
                 s_detail = 0;
@@ -495,9 +549,20 @@ int ui_wifiscan_key(hacku_key_t k) {
             return 0;
         case KEY_OK:
             if (s_count > 0) {
-                s_detail = 1;
-                s_page = 0;
-                draw_detail();
+                /* See arm_selected(): in one-button mode a double tap arms the
+                 * highlighted AP as the attack target, because KEY_RIGHT -
+                 * the only other way to do it - is a dead key there and the
+                 * detail view it used to live in is unreachable from the
+                 * keypad. On the six-button keypad OK still opens the detail
+                 * view and RIGHT still arms from there. */
+                if (hacku_input_onebutton()) {
+                    arm_selected();
+                    draw_list();
+                } else {
+                    s_detail = 1;
+                    s_page = 0;
+                    draw_detail();
+                }
             }
             return 0;
         case KEY_BACK:

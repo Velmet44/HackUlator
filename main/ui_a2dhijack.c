@@ -20,10 +20,11 @@
 /* Rows occupy y=10..54, which is five at ROW_H 9. */
 #define LIST_VISIBLE 5
 
-#define SCR_PAIR   0   /* "put it in pairing mode" */
+#define SCR_PAIR   0   /* "turn it on, don't pair it" */
 #define SCR_SINKS  1
-#define SCR_TUNES  2
-#define SCR_PLAY   3
+#define SCR_LINK   2   /* connect in flight */
+#define SCR_TUNES  3
+#define SCR_PLAY   4
 
 static int s_screen;
 static a2dp_sink_t s_sinks[A2DP_MAX_SINKS];
@@ -32,13 +33,11 @@ static int s_sink_sel;
 static int s_tune_sel;
 static int s_tune_top;
 static int s_sink_top;
-static char s_msg[40];
 static int s_error;   /* a failure is on screen, waiting for a keypress */
 
-static void set_msg(const char *m) {
-    snprintf(s_msg, sizeof(s_msg), "%s", m);
-    s_msg[32] = 0;
-}
+/* Forward declaration: the tick raises failures, and the failure path lives
+ * below the draw helpers where it belongs. */
+static void fail(const char *l1, const char *l2);
 
 static void scroll(int *top, int sel, int n) {
     /* Both lists WRAP. With the one-button mode there is no other way back
@@ -164,6 +163,73 @@ static void draw_list(const char *title, int n, int sel, int top,
     hal_oled_flush_all();
 }
 
+/* The one line that tells the truth about the link, for the screens that are
+ * not the PLAY screen.
+ *
+ * It was "linked" for anything that was merely CONNECTED, which is how a sink
+ * that had refused to start its media stream - and would stay silent - ended
+ * up looking identical to one playing. Four distinguishable words is the
+ * difference between a feature that can be debugged on a 128x64 panel and one
+ * that cannot.
+ *
+ * Where there IS a specific fault, the fault wins: "tx stalled" is worth
+ * knowing, "no stream" is not, and the generic wording would hide it. */
+static const char *link_line(void) {
+    a2dp_link_t l = svc_a2dp_link();
+    switch (l) {
+    case A2DP_LINK_DOWN:   return "BT down";
+    case A2DP_LINK_IDLE:   return "not linked";
+    case A2DP_LINK_WAIT:   return "linking...";
+    case A2DP_LINK_STREAMING: return "streaming";
+    case A2DP_LINK_MEDIA:
+        if (svc_a2dp_failed()) {
+            return svc_a2dp_note();
+        }
+        return "no stream";
+    default:
+        if (svc_a2dp_failed()) {
+            return svc_a2dp_note();
+        }
+        return "not linked";
+    }
+}
+
+/* One line describing what the audio path is ACTUALLY doing right now. A
+ * tune that is being decoded but not being sent reads the same as a tune that
+ * is being sent, and the difference is the entire bug. */
+static const char *play_line(char *out, size_t n) {
+    a2dp_link_t l = svc_a2dp_link();
+    const char *word;
+    switch (l) {
+    case A2DP_LINK_STREAMING: word = "stream"; break;
+    case A2DP_LINK_MEDIA:     word = "no stream"; break;
+    case A2DP_LINK_WAIT:      word = "linking"; break;
+    case A2DP_LINK_FAILED:    word = svc_a2dp_note(); break;
+    case A2DP_LINK_DOWN:      word = "BT down"; break;
+    default:                  word = "no link"; break;
+    }
+    snprintf(out, n, "%s notes %lu", word, (unsigned long)svc_a2dp_notes());
+    return out;
+}
+
+static void draw_link(void) {
+    oled_fb_t *fb = hal_oled_fb();
+    oled_clear(fb, 0);
+    chrome(fb, "LINKING");
+    const char *nm = svc_a2dp_peer_name();
+    char l[33];
+    snprintf(l, sizeof(l), "%.31s", nm && nm[0] ? nm : "sink");
+    l[32] = 0;
+    int w = oled_text_w(&oled_font, l);
+    oled_text(fb, &oled_font, (OLED_W - w) / 2, 20, l, 1);
+    snprintf(l, sizeof(l), "%.31s", link_line());
+    l[32] = 0;
+    w = oled_text_w(&oled_font, l);
+    oled_text(fb, &oled_font, (OLED_W - w) / 2, 34, l, 1);
+    footer(fb, "BK=back");
+    hal_oled_flush_all();
+}
+
 static void draw_play(void) {
     oled_fb_t *fb = hal_oled_fb();
     oled_clear(fb, 0);
@@ -174,7 +240,7 @@ static void draw_play(void) {
     l[32] = 0;
     int w = oled_text_w(&oled_font, l);
     oled_text(fb, &oled_font, (OLED_W - w) / 2, 18, l, 1);
-    snprintf(l, sizeof(l), "notes %lu", (unsigned long)svc_a2dp_notes());
+    play_line(l, sizeof(l));
     l[32] = 0;
     w = oled_text_w(&oled_font, l);
     oled_text(fb, &oled_font, (OLED_W - w) / 2, 32, l, 1);
@@ -188,13 +254,15 @@ static void redraw(void) {
     } else if (s_screen == SCR_SINKS) {
         draw_list("SPEAKERS", s_nsinks, s_sink_sel, s_sink_top, 0,
                   "OK=link RGT=more");
+    } else if (s_screen == SCR_LINK) {
+        draw_link();
     } else if (s_screen == SCR_TUNES) {
         /* The link state belongs on this screen. "TUNES" over a dead link
          * looks identical to a working one, and the media stream starts
          * asynchronously, so without this there is no way to tell a speaker
          * that connected from one that is still negotiating. */
         char foot[33];
-        snprintf(foot, sizeof(foot), "%s OK=play", svc_a2dp_state_name());
+        snprintf(foot, sizeof(foot), "%s OK=play", link_line());
         foot[32] = 0;
         draw_list("TUNES", TUNE_COUNT, s_tune_sel, s_tune_top, 1, foot);
     } else {
@@ -205,42 +273,109 @@ static void redraw(void) {
 void ui_a2dhijack_run(void) {
     s_screen = SCR_PAIR;
     s_error = 0;
-    set_msg("");
     /* Read the stored address before drawing. The pair screen asks "is there
      * a stored speaker?" to decide whether OK reconnects or runs discovery,
      * and that answer comes from NVS - which is not loaded until the BT stack
      * comes up, which is the thing this branch decides whether to do. Asking
      * first therefore always said "no". */
     svc_a2dp_load_stored();
-    /* The A2DP stack is NOT brought up here. Discovery needs the controller
+    /* THE A2DP STACK IS NOT BROUGHT UP HERE. Discovery needs the controller
      * twice - once BLE-only for the advert scan, once BTDM for classic
      * inquiry - and bringing up the 41 KB profile first would block both.
      * It comes up in do_connect(), which is also the honest place for it:
      * that is the point where the RAM is actually wanted. */
+    /* Also clears a "tune finished" left over from a previous visit. That flag
+     * is sticky and the tick acts on it by MOVING THE SCREEN, so a stale one
+     * re-enters the tune list forever - see svc_a2dp_clear_tune_done(). */
+    svc_a2dp_clear_tune_done();
     redraw();
     hacku_input_drain();
 }
 
 int ui_a2dhijack_tick(void) {
-    /* End of tune is honoured HERE, never in the producer task: the task must
+    a2dp_link_t link;
+    int changed;
+
+    /* Nothing may move the screen while a failure is being read. The tick
+     * runs every 500 ms for as long as the message is up, and a screen that
+     * changes under a message the user has not finished reading is a message
+     * they never read. */
+    if (s_error) {
+        return 0;
+    }
+
+    /* Housekeeping FIRST and unconditionally: this is what re-asks a sink
+     * that refused to start its media stream, and it must keep running on
+     * every screen of this feature, not only the ones that happen to show
+     * the link state. */
+    changed = svc_a2dp_pump();
+    link = svc_a2dp_link();
+
+    if (s_screen == SCR_LINK) {
+        if (link == A2DP_LINK_MEDIA || link == A2DP_LINK_STREAMING) {
+            s_screen = SCR_TUNES;
+            redraw();
+            return 1;
+        }
+        if (link == A2DP_LINK_FAILED) {
+            fail("no link",
+                 svc_a2dp_failed() ? svc_a2dp_note() : "speaker off?");
+            return 1;
+        }
+        /* Only the middle line changes while waiting. */
+        {
+            oled_fb_t *fb = hal_oled_fb();
+            char l[33];
+            oled_fill_rect(fb, 0, 30, OLED_W, 14, 0);
+            snprintf(l, sizeof(l), "%.31s", link_line());
+            l[32] = 0;
+            int w = oled_text_w(&oled_font, l);
+            oled_text(fb, &oled_font, (OLED_W - w) / 2, 34, l, 1);
+            hal_oled_flush(0, 30, OLED_W, 14);
+        }
+        return 1;
+    }
+
+    /* End of tune. Honoured HERE, never in the producer task: the task must
      * not wait on its own completion, same two-phase rule as svc_deauth,
-     * svc_ble's flood and wicoll. */
-    if (svc_a2dp_tune_done() && !svc_a2dp_busy()) {
+     * svc_ble's flood and wicoll.
+     *
+     * It is gated on being ON the play screen, and that gate is the fix for
+     * "it flashes into another screen and comes back into the tune list":
+     * the flag is sticky, so acting on it from every screen meant that
+     * pressing BACK from the tune list was undone by the very next tick, and
+     * the user could not leave the screen at all. The flag is also CLEARED
+     * once acted on, so it cannot fire a second time. */
+    if (s_screen == SCR_PLAY && svc_a2dp_tune_done() && !svc_a2dp_busy()) {
+        svc_a2dp_clear_tune_done();
         s_screen = SCR_TUNES;
         redraw();
         return 1;
     }
+
     if (s_screen != SCR_PLAY) {
-        return 0;
+        return changed;
     }
-    oled_fb_t *fb = hal_oled_fb();
-    oled_fill_rect(fb, 0, 28, OLED_W, 12, 0);
-    char l[33];
-    snprintf(l, sizeof(l), "notes %lu", (unsigned long)svc_a2dp_notes());
-    l[32] = 0;
-    int w = oled_text_w(&oled_font, l);
-    oled_text(fb, &oled_font, (OLED_W - w) / 2, 32, l, 1);
-    hal_oled_flush(0, 28, OLED_W, 12);
+
+    /* Producer died on an error rather than at the end of the tune: say so.
+     * Without this the screen keeps showing "notes 0" and the only evidence
+     * was a log line that the always-on caster suppresses by design. */
+    if (!svc_a2dp_busy() && !svc_a2dp_tune_done()) {
+        s_screen = SCR_TUNES;
+        fail("playback stopped",
+             svc_a2dp_failed() ? svc_a2dp_note() : "no link?");
+        return 1;
+    }
+    {
+        oled_fb_t *fb = hal_oled_fb();
+        char l[33];
+        oled_fill_rect(fb, 0, 28, OLED_W, 14, 0);
+        play_line(l, sizeof(l));
+        l[32] = 0;
+        int w = oled_text_w(&oled_font, l);
+        oled_text(fb, &oled_font, (OLED_W - w) / 2, 32, l, 1);
+        hal_oled_flush(0, 28, OLED_W, 14);
+    }
     return 1;
 }
 
@@ -255,6 +390,12 @@ static void do_discover(void) {
     s_sink_sel = 0;
     s_sink_top = 0;
     if (s_nsinks > 0) {
+        s_screen = SCR_SINKS;
+    } else if (s_nsinks == 0) {
+        /* Zero is a real answer, not an error: nothing in the room answered
+         * either way. Say so plainly instead of leaving the pair prompt up,
+         * which reads as though nothing was tried. */
+        s_nsinks = 0;
         s_screen = SCR_SINKS;
     }
     redraw();
@@ -286,6 +427,21 @@ static int stack_up(void) {
     return 0;
 }
 
+/* Ask for the link and go to the LINKING screen.
+ *
+ * The old code called svc_a2dp_connect() and jumped straight to the tune
+ * list. The connect is asynchronous and frequently slow - pairing takes tens
+ * of seconds when it happens at all - so that put the user on a tune list for
+ * a speaker that was not connected, with nothing on screen to say so, and
+ * pressing play started a producer that could only ever wait. */
+static void begin_link(void) {
+    s_error = 0;
+    s_tune_sel = 0;
+    s_tune_top = 0;
+    s_screen = SCR_LINK;
+    redraw();
+}
+
 static void do_connect(void) {
     if (s_sink_sel < 0 || s_sink_sel >= s_nsinks) {
         return;
@@ -294,16 +450,12 @@ static void do_connect(void) {
     if (stack_up() < 0) {
         return;
     }
+    svc_a2dp_set_name(nm);
     if (svc_a2dp_connect(s_sinks[s_sink_sel].bda) < 0) {
         fail("connect refused", "check speaker is on");
         return;
     }
-    s_error = 0;
-    svc_a2dp_set_name(nm);
-    s_tune_sel = 0;
-    s_tune_top = 0;
-    s_screen = SCR_TUNES;
-    redraw();
+    begin_link();
 }
 
 /* Connect to the stored speaker: no inquiry, so the speaker does not need to
@@ -312,16 +464,12 @@ static void do_connect_stored(void) {
     if (stack_up() < 0) {
         return;
     }
+    svc_a2dp_set_name(svc_a2dp_stored_name());
     if (svc_a2dp_connect_stored() < 0) {
         fail("no stored peer", "press RGT to search");
         return;
     }
-    s_error = 0;
-    svc_a2dp_set_name(svc_a2dp_stored_name());
-    s_tune_sel = 0;
-    s_tune_top = 0;
-    s_screen = SCR_TUNES;
-    redraw();
+    begin_link();
 }
 
 int ui_a2dhijack_key(hacku_key_t k) {
@@ -381,6 +529,19 @@ int ui_a2dhijack_key(hacku_key_t k) {
         return 0;
     }
 
+    if (s_screen == SCR_LINK) {
+        /* BACK while the link is still coming up: drop it, and go back to the
+         * list so another speaker can be picked. Leaving the request running
+         * would let the link appear behind a screen that has moved on. */
+        if (k == KEY_BACK) {
+            svc_a2dp_disconnect();
+            s_screen = s_nsinks > 0 ? SCR_SINKS : SCR_PAIR;
+            redraw();
+            return 0;
+        }
+        return 0;
+    }
+
     if (s_screen == SCR_TUNES) {
         if (k == KEY_BACK) {
             svc_a2dp_disconnect();
@@ -402,9 +563,18 @@ int ui_a2dhijack_key(hacku_key_t k) {
         }
         if (k == KEY_OK) {
             /* LEFT/RIGHT would be a stop/play toggle, but a list that only
-             * responds to OK and BACK is one fewer thing to get wrong. */
+             * responds to OK and BACK is one fewer thing to get wrong.
+             *
+             * Refused starts are shown rather than swallowed: "play" on a dead
+             * link used to do nothing at all and looked like a dead key. */
+            if (!svc_a2dp_connected()) {
+                fail("not linked", "BK then pick again");
+                return 0;
+            }
             if (svc_a2dp_play_tune(k_tunes[s_tune_sel].rtttl) == 0) {
                 s_screen = SCR_PLAY;
+            } else {
+                fail("play refused", "try again");
             }
             redraw();
         }
@@ -414,6 +584,9 @@ int ui_a2dhijack_key(hacku_key_t k) {
     /* SCR_PLAY */
     if (k == KEY_BACK || k == KEY_OK) {
         svc_a2dp_stop_tune();
+        /* Clear the sticky "finished" here too: leaving the screen by hand is
+         * exactly the case where it would otherwise still be set. */
+        svc_a2dp_clear_tune_done();
         s_screen = SCR_TUNES;
         redraw();
         return 0;
