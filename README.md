@@ -1,6 +1,6 @@
 # HackUlator
 
-ESP32 wardriving-style scanner disguised as a calculator. Boots into a working calculator; entering `4+6=` unlocks a hidden menu with **WiFi scan**, **BLE scan**, **WiFi attacks**, **BLE attacks**, **WiFi passive** and **BLE passive** (scrollable lists + detail screens).
+ESP32 wardriving-style scanner disguised as a calculator. Boots into a working calculator; entering `4+6=` unlocks a hidden menu with **WiFi scan**, **BLE scan**, **WiFi attacks**, **BLE attacks**, **WiFi passive**, **BLE passive**, **Channel survey**, **Collateral** and **Audio hijack** (scrollable lists + detail screens).
 
 Target: classic **ESP32-WROOM**, 0.96" **SSD1306 128x64 OLED** (I2C), 6 buttons. The mono UI is mirrored over USB serial to a PC viewer.
 
@@ -45,6 +45,12 @@ Target: classic **ESP32-WROOM**, 0.96" **SSD1306 128x64 OLED** (I2C), 6 buttons.
   - **Lock aims itself.** It surveys the band and parks on the busiest channel that carried a beacon — the beacon filter is what stops a transient data burst on an empty channel from winning. The chosen channel and how many channels held an AP are shown (`aim ch1 of 3 AP ch`), so a survey result can never be mistaken for a guess
   - **Measured on a victim's own link** (60 cm, AP on channel 1, 3 paired 15 s windows): p50 36-48 ms → 122-146 ms, p90 68 → 383 ms, packet loss 0.0% → 3.8%. Mode ranking puts **Lock** (110.7 ms mean) far clear of the rest; Full/Hot/Burst/All spread airtime over 4 or 13 channels, so the victim's single channel gets a fraction of it. Note the same build also gave 3.5× at 10 cm — six times the distance changed nothing, which a power-limited jammer should not do and which is still unexplained
   - Discovery and pairing are killable on both Bluetooth protocols with no defence to evade (AFH does not exist before a link). An **established BLE link will not drop** — LE has no ARQ and the supervision timeout needs 267 consecutive misses. An established **Classic** link does, because ACL retries indefinitely, so there is no middle state: audio cuts outright. **WiFi degrades latency; it never disconnects.**
+- **Audio hijack** (menu item 9) → plays coded tunes on a Bluetooth speaker or headset by connecting to it as an **A2DP source**. Not BLE audio (see below) — car stereos, older/budget headphones, older TVs and soundbars, anything with a classic A2DP profile
+  - **Tunes are RTTTL**, the Nokia ringtone text format: ~200 bytes per tune, plain text, monophonic note+duration+octave+tempo that maps 1:1 onto the oscillator. **Ten are built in, 3,038 bytes of flash total.** Adding one is: drop a `.rtttl` file into `tunes/` and run `python tools/gen_tunes.py`. [PICAXE ships a 10,000-tune zip](https://picaxe.com/rtttl-ringtones-for-tune-command/); [rtttl-hub.io](https://rtttl-hub.io/) has a browsable library and a MIDI→RTTTL converter. Existing Arduino melodies convert directly and exactly: `python tools/arduino2rtttl.py in.ino out.rtttl`
+  - **No decoder and no audio files.** A 256-entry signed-byte sine table in `.rodata` (flash, so **zero RAM**) driven by a 32-bit fixed-point phase accumulator, with a 5 ms / 10 ms envelope so notes don't click. All integer: the ESP32 has no FPU and a `sin()` call would pull in libm
+  - **The whole feature costs ~1.4 KB of RAM.** The ~41 KB A2DP stack is only allocated while a speaker is actually playing. Classic BT adds ~25 KB of *static* RAM that is linked in permanently — measured on this board: largest contiguous free block 110592 → 102400 with BTDM + Bluedroid + A2DP source + WiFi all up together, against a 16 KB floor
+  - **LE audio is unreachable, and that is hardware.** The ESP32's radio is a BLE 4.2 controller with no LE Audio, no LC3 and no BAP, so true-wireless earbuds on the LE Audio path can never be reached. Silicon, not configuration
+  - **Discovery is two techniques sharing ONE stack bring-up.** A BLE advert scan first (finds a speaker that is merely powered on — the advert's MAC field *is* the address A2DP needs), then classic inquiry filtered on the Class-of-Device "Rendering" bit (finds anything in pairing mode). Giving each half its own bring-up silently broke the inquiry half, because it was posting at a stack that had already been deinitialised
 - One radio at a time (WiFi torn down before BLE and vice versa); full teardown on lock (stealth + power)
 - SSD1306 probe at boot (I2C 0x3C/0x3D); without an OLED the device still runs caster-only
 - PKC dirty-rect caster mirror (always on): mono OLED pixels expanded to RGB565 white/black over UART0 @ 460800 baud + remote keys from viewer
@@ -117,15 +123,24 @@ All Python tools accept `--port` (auto-detected if omitted) and work on Windows 
 | `hk_test_deauth.py` | Deauth flow verifier (target select → run → counter → stop) |
 | `hk_test_rx.py` | Passive verifiers (menu scroll → submenus → RX monitor → BACK → BLE adv monitor) |
 | `hk_probe_contam.py` | Contamination probe: does RX count our own injected frames? |
+| `hk_probe_victim.py` | **The only attack test that measures effect.** Watches the PC's own adapter and reports *time on target*. Run `--control` first — without it one observed drop proves nothing |
 | `hk_test_advflood.py` | BLE ADV flood flow verifier (picker → run → counter → stop → relock) |
+| `hk_test_powerkill.py` | PowerKill flow verifier (CSA-only mode, phase A→B escalation, victim traffic delta) |
+| `hk_test_airtime.py` | Checks the airtime **estimate** against arithmetic under a known download — a model never compared to a load it should predict is just a number that looks like one |
+| `hk_test_newui.py` | Screenshots the newer surfaces (menu scroll, attack list, CSA-only, RX panels, channel survey). Regression proves nothing broke; it does not prove new screens render |
+| `hk_a2dhijack.py` | Audio-hijack flow verifier (menu → screen → discovery → connect path) |
+| `hk_rtttl.py` | Host-compiles `tune_rtttl.c` + `tune_synth.c` and checks them against a corpus of **real** RTTTL strings — dot before *and* after the octave, lowercase, embedded spaces, `h` for B, octaves outside 4–7 — plus 7 reference pitches and malformed input. `--wav out.wav` renders a tune to listen to |
+| `gen_tunes.py` | Regenerate `main/tune_data.h` from `tunes/*.rtttl` |
+| `arduino2rtttl.py` | Convert an Arduino `melody[]` sketch to RTTTL. Reads the sketch's own `NOTE_*` table; the tempo arithmetic is identical between the two formats, so the conversion is exact |
 | `hk_advtest.c` | Host-compiled check of the BLE advertising payload builder (AD lengths, 31-byte budget) |
+| `hk_pkframe.c` | Host-compiled check of the PowerKill TPC/CSA beacon. Compiles `main/pk_frame.c` **directly**, so a pass says something about the bytes that actually go out |
 | `hk_ocr.py` | Decode screen text from a captured PNG or a live frame (debugging aid, not a test oracle) |
 | `hk_activity.py` | Walk both scan detail views to the new activity fields |
 | `hk_validate_rx.py` | Counter-accuracy harness: scan for reference APs, hop to a channel, screenshot the self-check panel |
 | `hk_log.py` | Capture one boot log over UART0 @ 115200 |
 | `hk_wire.py` | Drive the UI and report which caster rects hit the wire |
 | `hk_px.py` / `hk_anchor.py` / `hk_palette.py` | Framebuffer pixel inspection / colour anchors / palette dump |
-| `gen_font.py` | Regenerate `main/font.h` |
+| `gen_font.py` | Regenerate `main/font_oled.h` |
 
 ```sh
 pip install pyserial pillow
@@ -134,15 +149,43 @@ python3 tools/hk_test_deauth.py --port COM5
 python3 tools/hk_log.py COM5 15
 ```
 
-Screenshots land in `test_out/`, `test_deauth/` (gitignored — throwaway).
+Screenshots land in `test_out/`, `test_a2dh/`, `test_deauth/` (gitignored — throwaway).
+
+### Cross-platform
+
+Everything under `tools/` runs on **Windows, Linux/Debian and macOS** — no
+Windows-only paths, and generated files are written with explicit `newline="\n"`
+so a Windows checkout does not produce CRLF in a C header.
+
+| Requirement | Windows | Linux/Debian |
+|---|---|---|
+| Python | 3.9+ | 3.9+ |
+| `pyserial`, `pillow` | for the viewer and the hardware verifiers | same |
+| C compiler | MSVC Build Tools (`vswhere` + `vcvars64.bat`, found automatically) | `gcc` or `clang`; `cc` is tried first but **Debian often has no `cc` symlink**, so `gcc` is probed too |
+| Extra | — | if `/tmp` is mounted `noexec`, set `TMPDIR` to a writable+executable dir |
+
+`hk_rtttl.py` locates the host compiler itself — MSVC through `vswhere` with the
+environment captured from `vcvars64.bat` (hand-assembling `INCLUDE` fails with a
+misleading `cannot open include file: 'string.h'`), and POSIX by probing
+`CC`, `cc`, `gcc`, `clang` with `--version`. Set `CC` to override.
+
+`hk_a2dhijack.py` follows the repo port convention: auto-detected, `--port` to
+override, `--list-ports` to see candidates.
+
+`gen_tunes.py` and `arduino2rtttl.py` are pure Python with no dependencies.
 
 ## Repo layout
 
 ```text
 main/            firmware: ui_* screens (incl. ui_wifipassive/ui_sniff/ui_blepassive/
-                ui_wicoll), svc_wifi/svc_ble/svc_target/svc_deauth/svc_resume/
-                svc_sniff/svc_wicoll, hal_oled/hal_input, caster, oled_gfx, font_oled
-tools/           viewer + headless verifiers + pixel/log probes
+                ui_wicoll/ui_a2dhijack), svc_wifi/svc_ble/svc_target/svc_deauth/
+                svc_resume/svc_sniff/svc_wicoll/svc_a2dp, tune_rtttl/tune_synth,
+                hal_oled/hal_input, caster, oled_gfx, font_oled
+                main/a2dhijack.md  full notes on the A2DP feature (read before editing it)
+tools/           viewer + headless verifiers + pixel/log probes + generators
+tunes/           *.rtttl sources for the built-in melodies; tunes/sources/ keeps
+                the original Arduino sketches they were converted from
+                (both are compiled in via main/tune_data.h - generated)
 firmware/        flashable pack (bootloader + partition-table + app + flash scripts)
 CMakeLists.txt   partitions.csv   sdkconfig.defaults   dependencies.lock
 AGENTS.md        repo conventions, build commands, hard constraints

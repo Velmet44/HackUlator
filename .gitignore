@@ -18,8 +18,16 @@ __pycache__/
 .venv/
 venv/
 
+# Host-compiled test binaries. tools/hk_rtttl.py and tools/hk_pkframe.c build
+# these on the PC; MSVC drops the objects in the working directory.
+*.obj
+*.exe
+rtttl.exe
+pkframe.exe
+
 # Test / probe screenshots (regenerable via tools/hk_test.py)
 test_out/
+test_a2dh/
 test_mem/
 test_mem2/
 test_mem3/

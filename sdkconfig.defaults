@@ -50,3 +50,22 @@ CONFIG_LWIP_MAX_ACTIVE_TCP=4
 CONFIG_LWIP_MAX_LISTENING_TCP=4
 CONFIG_LWIP_MAX_UDP_PCBS=4
 CONFIG_LWIP_MAX_SOCKETS=4
+
+# ---- Audio Device Hijacker: A2DP source ----
+# Classic BR/EDR is enabled purely for svc_a2dp. It costs ~25 KB of static RAM
+# that is linked whether or not the screen is open, plus ~41 KB of runtime RAM
+# that is only allocated while it IS open. Measured on this board: largest
+# contiguous free block 110592 -> 102400 with BTDM + Bluedroid + A2DP source
+# + WiFi all up together, against a 16 KB floor. The permanent cost lands on
+# total free, not on the block the project gates on, which is why this fits.
+#
+# BTDM rather than BR_EDR_ONLY: the BLE scanner is still a normal mode of this
+# device and giving up BLE to save RAM would cost more than it saves.
+CONFIG_BT_CLASSIC_ENABLED=y
+CONFIG_BTDM_CTRL_MODE_BTDM=y
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=n
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=n
+
+# SBC only. The A2DP MPEG-1/2 CIE structs in esp_a2dp_api.h are marked "Not
+# supported yet", and SBC is mandatory for every A2DP sink, so nothing is lost.
+CONFIG_BT_A2DP_ENABLE=y

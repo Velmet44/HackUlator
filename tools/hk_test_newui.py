@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Screenshot the new surfaces: the 7-item menu, the attack list scroll, the
-CSAonly mode, the RX monitor's third panel, and the channel survey.
+"""Screenshot the new surfaces: the menu scroll, the attack list scroll, the
+CSA-only mode, the RX monitor's third panel, the channel survey and Collateral.
 
 The regression suite proves nothing broke; it does not prove new screens
 render correctly. These are exactly the surfaces AGENTS.md warns about when
@@ -12,8 +12,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hk_test import Dev, POS  # noqa: E402
 
-# Must track MENU_ITEMS in main.c - index 0..6.
-MENU_N = 7
+# Must track MENU_ITEMS in main.c - index 0..7.
+#
+# This is load-bearing, not documentation. menu_to() below walks UP exactly
+# MENU_N times to park on index 0, relying on the list wrapping. When
+# Collateral was added as item 8 this constant stayed at 7, so seven UP
+# presses landed the cursor on index 3 instead of 0 and every menu_to() call
+# opened the wrong screen - silently, with screenshots still written.
+MENU_N = 8
 MENU_WIFI_SCAN = 0
 MENU_WIFI_ATK = 2
 MENU_WIFI_PASSIVE = 4
@@ -48,15 +54,17 @@ def main():
     for ch in "4+6=":
         goto(ch)
     d.pump(0.8)
-    shot("nw_00_menu.png")          # 7 items - does it scroll to the last?
+    shot("nw_00_menu.png")          # 8 items - does it scroll to the last?
 
     print("== scroll menu to the bottom ==", flush=True)
-    for _ in range(6):
+    for _ in range(MENU_N - 1):
         d.key("s")
     d.pump(0.5)
-    shot("nw_01_menu_bottom.png")   # is item 7 actually reachable?
+    shot("nw_01_menu_bottom.png")   # is item 8 (Collateral) actually reachable?
 
     print("== enter Channel survey (item 7) ==", flush=True)
+    d.key("w")                      # step back off Collateral onto the survey
+    d.pump(0.3)
     d.key("e")
     d.pump(1.2)
     shot("nw_02_survey_empty.png")
@@ -73,7 +81,9 @@ def main():
     # grid. The earlier version reused goto(), whose stray UP/DOWN presses
     # only reached the right screen by wrapping - it worked by accident.
     def menu_to(idx):
-        # The cursor wraps, so walk up to index 0 first, then down to idx.
+        # The cursor wraps, so walk up MENU_N times to land back on index 0,
+        # then down to idx. Both counts depend on the list length - see the
+        # MENU_N note above.
         for _ in range(MENU_N):
             d.key("w")
         for _ in range(idx):
@@ -81,11 +91,11 @@ def main():
         d.pump(0.4)
 
     print("== WiFi attacks (menu item 3) ==", flush=True)
-    menu_to(2)
+    menu_to(MENU_WIFI_ATK)
     d.key("e")
     d.pump(1.2)
     shot("nw_05_atk_top.png")
-    print("== scroll attack list to the last mode (CSAonly) ==", flush=True)
+    print("== scroll attack list to the last mode (CSA only) ==", flush=True)
     for _ in range(5):
         d.key("s")
     d.pump(0.6)
@@ -94,7 +104,7 @@ def main():
     d.pump(0.8)
 
     print("== WiFi passive -> RX monitor (menu item 5) ==", flush=True)
-    menu_to(4)
+    menu_to(MENU_WIFI_PASSIVE)
     d.key("e")
     d.pump(1.0)
     shot("nw_07_passive_submenu.png")

@@ -22,6 +22,8 @@
 #include "ui_survey.h"
 #include "ui_wicoll.h"
 #include "svc_wicoll.h"
+#include "svc_a2dp.h"
+#include "ui_a2dhijack.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
@@ -45,13 +47,15 @@ typedef enum {
     SCR_BLEADV,
     SCR_SURVEY,
     SCR_WICOLL,
+    SCR_AUDIOHIJACK,
 } screen_t;
 
 static const char *MENU_ITEMS[] = {
     "WiFi scan", "BLE scan", "WiFi attacks", "BLE attacks",
     "WiFi passive", "BLE passive", "Channel survey", "Collateral",
+    "Audio hijack",
 };
-#define MENU_N 8
+#define MENU_N 9
 
 static int64_t s_last_atk_tick = 0; /* live-attack status repaint (ms) */
 static int64_t s_last_sniff_tick = 0; /* passive counter repaint (ms) */
@@ -110,6 +114,9 @@ static void redraw_home(void) {
  * every TX timer and RX callback must die before the driver underneath them
  * goes away, or the next bring-up faults. See enter_menu_item(). */
 static void teardown_radios(void) {
+    /* svc_a2dp_stop() FIRST: its producer task and A2DP callbacks point
+     * into the BT stack, which svc_ble_stop() is about to unwind. */
+    svc_a2dp_stop();
     svc_deauth_stop();
     wicoll_stop();
     svc_sniff_stop();
@@ -259,14 +266,35 @@ static int enter_menu_item(int sel, screen_t *screen_out) {
         ui_wicoll_run();
         return 1;
     }
+    if (sel == 8) {                       /* audio device hijacker */
+        /* Every radio owner is stopped and its list freed. The A2DP stack
+         * needs the RAM they were holding, and BT and WiFi share one
+         * controller here. */
+        svc_deauth_stop();
+        wicoll_stop();
+        svc_sniff_stop();
+        svc_ble_passive_stop();
+        svc_ble_stop();
+        svc_wifi_teardown();
+        ui_wifiscan_drop();
+        ui_blescan_drop();
+        *screen_out = SCR_AUDIOHIJACK;
+        ui_a2dhijack_run();
+        return 1;
+    }
     return 0;
 }
 
 void app_main(void) {
-    /* BLE-only device: release Classic-BT controller RAM to the heap FIRST,
-     * before anything else fragments it. One-shot and irreversible; BLE
-     * bring-up later is unaffected. */
-    esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+    /* Classic-BT RAM is NOT released to the heap any more. The Audio Device
+     * Hijacker needs BR/EDR to exist as an A2DP source, and
+     * esp_bt_controller_mem_release() is a one-way door: once it has run the
+     * controller can never give that memory back. Releasing it saved roughly
+     * 25 KB and made the hijacker impossible; measured, the whole A2DP stack
+     * costs 25 KB of static RAM plus ~41 KB of runtime RAM that is only
+     * allocated while the hijacker screen is open, which fits with a 108 KB
+     * largest-block ceiling against a 16 KB floor.
+     */
     ESP_LOGI(TAG, "largest free block: %u",
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     int has_oled = hal_oled_init();
@@ -460,6 +488,11 @@ void app_main(void) {
                     screen = SCR_MENU;
                     show_menu();
                 }
+            } else if (screen == SCR_AUDIOHIJACK) {
+                if (ui_a2dhijack_key(k) == A2DH_EXIT_MENU) {
+                    screen = SCR_MENU;
+                    show_menu();
+                }
             }
         }
         hal_oled_caster_poll(); /* skipped-frame catch-up + self-heal */
@@ -500,6 +533,15 @@ void app_main(void) {
             if (now_ms - s_last_atk_tick >= 500) {
                 s_last_atk_tick = now_ms;
                 ui_wicoll_tick();
+            }
+        }
+        /* Same cadence for the hijacker: its tick is where a finished tune
+         * is noticed, which cannot happen inside the producer task. */
+        if (screen == SCR_AUDIOHIJACK) {
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            if (now_ms - s_last_sniff_tick >= 500) {
+                s_last_sniff_tick = now_ms;
+                ui_a2dhijack_tick();
             }
         }
         if (unlocked &&

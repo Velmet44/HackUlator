@@ -362,6 +362,65 @@ cmd /c "set PATH=C:\Espressif\tools\idf-python\3.11.2;%PATH% && call C:\Espressi
 
 ## Hard constraints
 
+* **`svc_a2dp.*` / `ui_a2dhijack.*` / `tune_rtttl.*` / `tune_synth.*` —
+  "Audio Device Hijacker" (menu item 9)**, A2DP **source**: connect to a
+  Bluetooth audio sink and play coded tunes on it. Own gear.
+  **FULL NOTES: `main/a2dhijack.md`** — RAM measurements, every bug found,
+  the verified/unverified split, and the dead ends. Read it before changing
+  any of this.
+  Parts that bite:
+  - **Classic BT only. There is no BLE audio and there never will be.** The
+    radio is a BLE 4.2 controller with no LE Audio / LC3 / BAP. TWS earbuds
+    on the LE Audio path are unreachable; that is silicon, not
+    configuration, and no amount of work changes it.
+  - **`esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT)` is GONE from
+    `app_main()` and must not come back.** It is a one-way door: once it runs
+    the controller can never give that RAM back, which makes A2DP impossible.
+    Costs ~25 KB static. Measured 110592 -> 102400 largest free block with
+    BTDM + Bluedroid + A2DP source + WiFi all up; floor is 16 KB. The
+    ~41 KB runtime cost is only paid while a speaker is playing.
+  - **`sdkconfig.defaults` is ONLY read on a fresh configure.** Delete
+    `sdkconfig` (gitignored) or an existing one silently overrides it. That
+    cost a whole build: every Classic-BT symbol failed to link with no error
+    pointing anywhere near the cause.
+  - **Discovery is two techniques and they MUST share ONE stack bring-up.**
+    BLE advert scan (a powered-on speaker is invisible to inquiry, but its
+    advert's MAC field *is* the A2DP address) then classic inquiry filtered
+    on the COD "Rendering" bit. The first version gave each half its own
+    bring-up, so `svc_a2dp_find_by_ble()` ended with
+    `esp_bt_controller_deinit()` and the inquiry that followed was posting at
+    a dead stack. It looked exactly like a device that was not discoverable —
+    same bug shape as the collateral profile desync.
+  - **`esp_a2d_source_audio_data_send()` does NOT copy the buffer.**
+    `btc_av_audio_buff_alloc()` hands out a `BT_HDR` with the payload
+    *inside* that allocation and the caller's `esp_a2d_audio_buff_t`
+    overlays it; on `ESP_OK` the **stack owns it**. A static buffer corrupts
+    the BT queue and presents as audio corruption, not a crash. Allocate per
+    send, hand over on success, `esp_a2d_audio_buff_free()` on refusal.
+  - **The producer MUST be paced against the sample clock.** Sending as fast
+    as the stack accepts starves the idle task and trips the task WDT inside
+    `feed_task`. Count frames against a 10 ms budget (441 samples) and
+    `vTaskDelay(1)` per window. An A2DP source is a real-time producer.
+  - **Do NOT gate `start_feed()` on `s_media_ready`.** Media starts
+    asynchronously (connection -> CHECK_SRC_RDY -> START -> AUDIO_STATE_STARTED)
+    so it is normally not ready when the user presses play. The task already
+    waits internally; gating the start on it meant the tune never began and
+    never retried, with no error anywhere.
+  - **Two-phase stop, and the disconnect is asynchronous.**
+    `esp_a2d_source_disconnect()` only posts a request; the reply lands in
+    the profile being deinit'd. Wait (bounded) for `s_connected` to clear.
+  - **Return-code trap:** `A2DH_EXIT_MENU` is 1 and **0 means STAY**. Every
+    path in `ui_a2dhijack_key()` returns 0 unless it means to leave.
+  - **RTTTL violates its own spec constantly.** The parser accepts the dotted
+    '.' **before or after** the octave (most real files use before), lowercase,
+    embedded spaces, `h`/`H` for B, `p` for rest, octaves outside 4-7 and
+    names over 10 chars. A spec-strict parser fails on the first real tune.
+    `tools/hk_rtttl.py` exists to test against real strings, not tidy ones.
+  - **The PCM staging buffer is `int16_t[]`, not `uint8_t[]`.** Xtensa faults
+    on an unaligned halfword load and a `uint8_t` array is only 1-byte aligned.
+  - **`tune_tables.h` and `tune_data.h` are generated** by
+    `tools/gen_tunes.py` from `tunes/*.rtttl`. Never hand-edit, like
+    `font_oled.h`.
 * **Injection**: `wsl_bypasser.*` overrides the driver's private
   `ieee80211_raw_frame_sanity_check()` (which lives in the closed Wi-Fi blob
   and rejects management subtypes) and `main/CMakeLists.txt` links with
